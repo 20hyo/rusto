@@ -73,9 +73,23 @@ jobs:
             # Load Rust environment
             source "$HOME/.cargo/env"
 
-            # Build release binary
+            # Check and create swap if needed (for low-memory instances)
+            if [ ! -f /swapfile ]; then
+              echo "Creating swap file for build (requires sudo)..."
+              sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+              sudo chmod 600 /swapfile
+              sudo mkswap /swapfile
+              sudo swapon /swapfile
+              echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+              echo "Swap created successfully"
+            else
+              echo "Swap already exists"
+              sudo swapon /swapfile || true
+            fi
+
+            # Build release binary with limited parallelism to avoid OOM
             echo "Building release binary..."
-            cargo build --release
+            cargo build --release -j 1
 
             # Restart service
             echo "Restarting rusto service..."
