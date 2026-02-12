@@ -33,11 +33,27 @@ jobs:
 
             echo "=== Starting Rusto deployment ==="
 
-            # Navigate to application directory
-            cd ~/rusto || cd ~/fabio-trading || {
-              echo "Error: Application directory not found"
-              exit 1
-            }
+            # Check if Rust is installed
+            if [ ! -f "$HOME/.cargo/env" ]; then
+              echo "Installing Rust..."
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            fi
+            source "$HOME/.cargo/env"
+
+            # Navigate to application directory or clone if not exists
+            if [ -d ~/rusto ]; then
+              echo "Found existing rusto directory"
+              cd ~/rusto
+            elif [ -d ~/fabio-trading ]; then
+              echo "Found existing fabio-trading directory, renaming to rusto"
+              mv ~/fabio-trading ~/rusto
+              cd ~/rusto
+            else
+              echo "Repository not found, cloning..."
+              cd ~
+              git clone https://github.com/20hyo/rusto.git
+              cd ~/rusto
+            fi
 
             # Pull latest changes
             echo "Pulling latest code..."
