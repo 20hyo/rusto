@@ -1,0 +1,5 @@
+/target
+.env
+trades.csv
+trades.json
+trades.db

@@ -1,0 +1,48 @@
+[general]
+symbols = ["btcusdt", "ethusdt"]
+log_level = "info"
+
+[range_bar]
+# Range size per symbol (USDT price movement per bar)
+btcusdt = 50.0
+ethusdt = 3.0
+default = 10.0
+
+[volume_profile]
+tick_size = 0.1
+value_area_pct = 0.70
+session_reset_hours = 24
+
+[order_flow]
+absorption_delta_ratio = 3.0
+max_price_delta_ticks = 2
+large_volume_multiplier = 2.0
+
+[strategy]
+enabled_setups = ["AAA", "MomentumSqueeze", "AbsorptionReversal"]
+aaa_poc_distance_ticks = 5
+momentum_lookback_bars = 20
+min_delta_confirmation = 1.5
+
+[risk]
+initial_balance = 10000.0
+max_risk_per_trade = 0.01
+daily_loss_limit_pct = 0.03
+max_concurrent_positions = 3
+break_even_ticks = 3
+default_stop_ticks = 10
+default_target_multiplier = 2.0
+
+[simulator]
+slippage_ticks = 1
+maker_fee = 0.0002
+taker_fee = 0.0004
+order_book_depth = 20
+
+[logging]
+trades_csv_path = "trades.csv"
+trades_json_path = "trades.json"
+trades_db_path = "trades.db"
+
+[discord]
+enabled = true
