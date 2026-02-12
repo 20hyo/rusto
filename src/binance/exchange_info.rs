@@ -366,10 +366,16 @@ mod tests {
             min_notional: Decimal::from(5),
         };
 
-        // Test price rounding
-        let price = Decimal::new(500025, 1); // 50002.5
+        // Test price rounding (tick_size = 0.1)
+        // 50002.56 should round to 50002.6
+        let price = Decimal::new(5000256, 2); // 50002.56
         let rounded = info.round_price(price).unwrap();
-        assert_eq!(rounded, Decimal::new(500030, 1)); // Should round to 50003.0
+        assert_eq!(rounded, Decimal::new(500026, 1)); // Should round to 50002.6
+
+        // 50002.54 should round to 50002.5
+        let price2 = Decimal::new(5000254, 2); // 50002.54
+        let rounded2 = info.round_price(price2).unwrap();
+        assert_eq!(rounded2, Decimal::new(500025, 1)); // Should round to 50002.5
 
         // Test quantity rounding
         let qty = Decimal::new(12345, 4); // 1.2345
