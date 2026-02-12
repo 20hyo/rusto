@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub simulator: SimulatorConfig,
     pub logging: LoggingConfig,
     pub discord: DiscordConfig,
+    pub binance: BinanceConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -78,6 +79,9 @@ pub struct SimulatorConfig {
     pub maker_fee: f64,
     pub taker_fee: f64,
     pub order_book_depth: usize,
+    pub leverage: f64,
+    pub margin_type: String,
+    pub maintenance_margin_rate: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -97,6 +101,14 @@ impl DiscordConfig {
         std::env::var("DISCORD_WEBHOOK_URL")
             .map_err(|_| "DISCORD_WEBHOOK_URL not set in .env file".to_string())
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BinanceConfig {
+    pub api_url: String,
+    pub max_time_offset_ms: i64,
+    pub max_latency_ms: f64,
+    pub ping_samples: usize,
 }
 
 impl AppConfig {

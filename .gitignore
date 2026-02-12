@@ -1,5 +1,41 @@
-/target
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Environment
 .env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+rusto.log
+rusto.error.log
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Trading data
 trades.csv
 trades.json
-trades.db
+backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# SSH Keys
+*.pem
+*.ppk
+id_rsa*
+
+# System
+Thumbs.db

@@ -15,10 +15,11 @@ pub struct RiskManager {
     /// Currently open positions per symbol
     open_positions: BTreeMap<String, Vec<String>>, // symbol -> position_ids
     daily_halted: bool,
+    leverage: Decimal,
 }
 
 impl RiskManager {
-    pub fn new(config: &RiskConfig) -> Self {
+    pub fn new(config: &RiskConfig, leverage: Decimal) -> Self {
         let balance = Decimal::try_from(config.initial_balance).unwrap_or(Decimal::from(10000));
         let daily_limit = balance
             * Decimal::try_from(config.daily_loss_limit_pct).unwrap_or_else(|_| Decimal::new(3, 2));
@@ -32,6 +33,7 @@ impl RiskManager {
             break_even_ticks: Decimal::from(config.break_even_ticks),
             open_positions: BTreeMap::new(),
             daily_halted: false,
+            leverage,
         }
     }
 
@@ -66,8 +68,12 @@ impl RiskManager {
         true
     }
 
-    /// Calculate position size based on risk
-    /// size = (balance * max_risk_per_trade) / stop_distance
+    /// Calculate position size based on risk and leverage
+    /// For leveraged trading:
+    /// - risk_amount = balance * max_risk_per_trade (what we're willing to lose)
+    /// - stop_distance = abs(entry - stop)
+    /// - quantity = risk_amount / stop_distance
+    /// - required_margin = (entry_price * quantity) / leverage
     pub fn calculate_position_size(&self, signal: &TradeSignal) -> Decimal {
         let stop_distance = (signal.entry_price - signal.stop_loss).abs();
         if stop_distance == Decimal::ZERO {
@@ -78,17 +84,45 @@ impl RiskManager {
             * Decimal::try_from(self.config.max_risk_per_trade)
                 .unwrap_or_else(|_| Decimal::new(1, 2));
 
-        let size = risk_amount / stop_distance;
+        // Calculate quantity based on risk per trade
+        let quantity = risk_amount / stop_distance;
+
+        // Calculate required margin for this position
+        let required_margin = (signal.entry_price * quantity) / self.leverage;
+
+        // Ensure we have enough balance for the margin
+        if required_margin > self.balance {
+            warn!(
+                symbol = %signal.symbol,
+                required_margin = %required_margin,
+                balance = %self.balance,
+                "Insufficient balance for position, reducing size"
+            );
+            // Reduce quantity to fit available balance
+            let adjusted_quantity = (self.balance * self.leverage) / signal.entry_price;
+            info!(
+                symbol = %signal.symbol,
+                risk_amount = %risk_amount,
+                stop_distance = %stop_distance,
+                quantity = %adjusted_quantity,
+                required_margin = %self.balance,
+                leverage = %self.leverage,
+                "Position size calculated (adjusted)"
+            );
+            return adjusted_quantity;
+        }
 
         info!(
             symbol = %signal.symbol,
             risk_amount = %risk_amount,
             stop_distance = %stop_distance,
-            size = %size,
+            quantity = %quantity,
+            required_margin = %required_margin,
+            leverage = %self.leverage,
             "Position size calculated"
         );
 
-        size
+        quantity
     }
 
     /// Register a new open position

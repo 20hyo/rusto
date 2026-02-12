@@ -1,3 +1,4 @@
+pub mod binance;
 pub mod config;
 pub mod discord;
 pub mod market_data;

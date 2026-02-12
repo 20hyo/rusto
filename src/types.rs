@@ -93,6 +93,8 @@ pub struct VolumeProfileSnapshot {
     pub total_volume: Decimal,
     pub session_high: Decimal,
     pub session_low: Decimal,
+    pub vwap: Decimal, // Volume Weighted Average Price (last 1 hour)
+    pub hvn: Option<Decimal>, // High Volume Node (last 1 hour)
     pub timestamp: DateTime<Utc>,
 }
 
@@ -105,6 +107,9 @@ pub struct OrderFlowMetrics {
     pub absorption_detected: bool,
     pub absorption_side: Option<Side>, // Side being absorbed
     pub imbalance_ratio: Decimal,
+    pub cvd_1min_change: Decimal,    // CVD change over last 1 minute
+    pub cvd_rapid_drop: bool,        // True if CVD dropped rapidly (sell-side explosion)
+    pub cvd_rapid_rise: bool,        // True if CVD rose rapidly (buy-side explosion)
     pub timestamp: DateTime<Utc>,
 }
 
@@ -114,6 +119,7 @@ pub enum SetupType {
     AAA,                  // Absorption At Area
     MomentumSqueeze,      // Breakout with delta confirmation
     AbsorptionReversal,   // Pure absorption reversal
+    AdvancedOrderFlow,    // Advanced order flow: zone filtering + CVD + orderbook imbalance
 }
 
 impl std::fmt::Display for SetupType {
@@ -122,6 +128,7 @@ impl std::fmt::Display for SetupType {
             SetupType::AAA => write!(f, "AAA"),
             SetupType::MomentumSqueeze => write!(f, "MomentumSqueeze"),
             SetupType::AbsorptionReversal => write!(f, "AbsorptionReversal"),
+            SetupType::AdvancedOrderFlow => write!(f, "AdvancedOrderFlow"),
         }
     }
 }
@@ -164,14 +171,31 @@ impl TradeSignal {
     }
 }
 
+/// Margin type for futures trading
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MarginType {
+    Isolated,
+    Cross,
+}
+
+impl std::fmt::Display for MarginType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MarginType::Isolated => write!(f, "Isolated"),
+            MarginType::Cross => write!(f, "Cross"),
+        }
+    }
+}
+
 /// Position status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PositionStatus {
     Open,
     Closed,
+    Liquidated,
 }
 
-/// Simulated position
+/// Simulated position with leverage support
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Position {
     pub id: String,
@@ -188,6 +212,48 @@ pub struct Position {
     pub exit_time: Option<DateTime<Utc>>,
     pub exit_price: Option<Decimal>,
     pub break_even_moved: bool,
+    // Leverage fields
+    pub leverage: Decimal,
+    pub margin_type: MarginType,
+    pub liquidation_price: Decimal,
+    pub unrealized_pnl: Decimal,
+    pub initial_margin: Decimal,
+    pub maintenance_margin: Decimal,
+    // Multi-stage exit tracking
+    pub tp1_filled: bool,              // TP1 (50% at VWAP) executed
+    pub tp1_price: Option<Decimal>,    // VWAP target
+    pub tp2_price: Option<Decimal>,    // VAH target
+    pub original_quantity: Decimal,    // Original full quantity
+}
+
+impl Position {
+    /// Calculate unrealized PnL based on current mark price
+    pub fn calculate_unrealized_pnl(&self, mark_price: Decimal) -> Decimal {
+        let raw_pnl = match self.side {
+            Side::Buy => (mark_price - self.entry_price) * self.quantity,
+            Side::Sell => (self.entry_price - mark_price) * self.quantity,
+        };
+        raw_pnl
+    }
+
+    /// Calculate margin ratio: (balance + unrealized_pnl) / maintenance_margin * 100
+    /// Returns percentage. If <= 100%, liquidation occurs
+    pub fn calculate_margin_ratio(&self, account_balance: Decimal, mark_price: Decimal) -> Decimal {
+        if self.maintenance_margin == Decimal::ZERO {
+            return Decimal::from(999); // Safe value
+        }
+        let unrealized = self.calculate_unrealized_pnl(mark_price);
+        let equity = account_balance + unrealized;
+        (equity / self.maintenance_margin) * Decimal::from(100)
+    }
+
+    /// Check if position should be liquidated based on mark price
+    pub fn should_liquidate(&self, mark_price: Decimal) -> bool {
+        match self.side {
+            Side::Buy => mark_price <= self.liquidation_price,
+            Side::Sell => mark_price >= self.liquidation_price,
+        }
+    }
 }
 
 /// Events flowing through the processing pipeline
@@ -204,6 +270,8 @@ pub enum ProcessingEvent {
 pub enum ExecutionEvent {
     PositionOpened(Position),
     PositionClosed(Position),
+    PositionLiquidated(Position),
+    TP1Filled { position_id: String, tp1_price: Decimal, partial_pnl: Decimal },
     StopMoved { position_id: String, new_stop: Decimal },
     DailyLimitReached { pnl: Decimal },
 }

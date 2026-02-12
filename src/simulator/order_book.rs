@@ -76,4 +76,50 @@ impl LocalOrderBook {
         let ask = self.best_ask()?;
         Some(ask - bid)
     }
+
+    /// Calculate total bid volume in order book
+    pub fn total_bid_volume(&self) -> Decimal {
+        self.bids.values().sum()
+    }
+
+    /// Calculate total ask volume in order book
+    pub fn total_ask_volume(&self) -> Decimal {
+        self.asks.values().sum()
+    }
+
+    /// Calculate bid/ask depth ratio
+    /// Returns (bid_volume, ask_volume, ratio)
+    /// ratio > 1.0 means more bids (buying pressure)
+    /// ratio < 1.0 means more asks (selling pressure)
+    pub fn depth_imbalance(&self) -> (Decimal, Decimal, Decimal) {
+        let bid_vol = self.total_bid_volume();
+        let ask_vol = self.total_ask_volume();
+
+        let ratio = if ask_vol > Decimal::ZERO {
+            bid_vol / ask_vol
+        } else if bid_vol > Decimal::ZERO {
+            Decimal::from(999)
+        } else {
+            Decimal::ONE
+        };
+
+        (bid_vol, ask_vol, ratio)
+    }
+
+    /// Check if there's strong bid-side imbalance (Bid >= 2x Ask)
+    /// This suggests absorption of sell orders
+    pub fn has_strong_bid_imbalance(&self) -> bool {
+        let (_, _, ratio) = self.depth_imbalance();
+        ratio >= Decimal::TWO
+    }
+
+    /// Check if there's strong ask-side imbalance (Ask >= 2x Bid)
+    /// This suggests absorption of buy orders
+    pub fn has_strong_ask_imbalance(&self) -> bool {
+        let (bid_vol, ask_vol, _) = self.depth_imbalance();
+        if bid_vol == Decimal::ZERO {
+            return false;
+        }
+        ask_vol / bid_vol >= Decimal::TWO
+    }
 }

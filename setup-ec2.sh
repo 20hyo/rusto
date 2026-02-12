@@ -47,10 +47,10 @@ EOF
 echo "Cloning repository..."
 sudo -u rusto bash <<'EOF'
 cd ~
-if [ ! -d "$HOME/fabio-trading" ]; then
-    git clone https://github.com/20hyo/fabio-trading.git
+if [ ! -d "$HOME/rusto" ]; then
+    git clone https://github.com/20hyo/rusto.git
 else
-    cd fabio-trading
+    cd rusto
     git pull
 fi
 EOF
@@ -58,7 +58,7 @@ EOF
 # Setup environment variables
 echo "Setting up environment variables..."
 sudo -u rusto bash <<'EOF'
-cd ~/fabio-trading
+cd ~/rusto
 if [ ! -f .env ]; then
     cp .env.example .env
     echo "WARNING: Please update .env file with your Discord webhook URL!"
@@ -68,7 +68,7 @@ EOF
 # Build the project
 echo "Building Rusto..."
 sudo -u rusto bash <<'EOF'
-cd ~/fabio-trading
+cd ~/rusto
 source "$HOME/.cargo/env"
 cargo build --release
 EOF
@@ -83,13 +83,13 @@ After=network.target
 [Service]
 Type=simple
 User=rusto
-WorkingDirectory=/home/rusto/fabio-trading
+WorkingDirectory=/home/rusto/rusto
 Environment="PATH=/home/rusto/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/home/rusto/fabio-trading/target/release/rusto
+ExecStart=/home/rusto/rusto/target/release/rusto
 Restart=always
 RestartSec=10
-StandardOutput=append:/home/rusto/fabio-trading/rusto.log
-StandardError=append:/home/rusto/fabio-trading/rusto.error.log
+StandardOutput=append:/home/rusto/rusto/rusto.log
+StandardError=append:/home/rusto/rusto/rusto.error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -102,20 +102,20 @@ systemctl daemon-reload
 echo "=== Setup Complete ==="
 echo ""
 echo "IMPORTANT: Before starting the bot, you MUST:"
-echo "1. Edit /home/rusto/fabio-trading/.env and set your DISCORD_WEBHOOK_URL"
-echo "2. Review /home/rusto/fabio-trading/config.toml if needed"
+echo "1. Edit /home/rusto/rusto/.env and set your DISCORD_WEBHOOK_URL"
+echo "2. Review /home/rusto/rusto/config.toml if needed"
 echo ""
 echo "To configure and start the bot:"
-echo "  sudo -u rusto nano /home/rusto/fabio-trading/.env"
+echo "  sudo -u rusto nano /home/rusto/rusto/.env"
 echo "  sudo systemctl enable rusto"
 echo "  sudo systemctl start rusto"
 echo ""
 echo "To view logs:"
 echo "  sudo journalctl -u rusto -f"
-echo "  tail -f /home/rusto/fabio-trading/rusto.log"
+echo "  tail -f /home/rusto/rusto/rusto.log"
 echo ""
 echo "To update the bot:"
-echo "  cd /home/rusto/fabio-trading"
+echo "  cd /home/rusto/rusto"
 echo "  sudo -u rusto git pull"
 echo "  sudo -u rusto cargo build --release"
 echo "  sudo systemctl restart rusto"

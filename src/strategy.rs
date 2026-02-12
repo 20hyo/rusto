@@ -67,6 +67,11 @@ impl StrategyEngine {
                         signals.push(sig);
                     }
                 }
+                "AdvancedOrderFlow" => {
+                    if let Some(sig) = self.check_advanced_orderflow(bar) {
+                        signals.push(sig);
+                    }
+                }
                 _ => {}
             }
         }
@@ -287,5 +292,94 @@ impl StrategyEngine {
                 ))
             }
         }
+    }
+
+    /// AdvancedOrderFlow: "폭발 직전의 압축 포착"
+    /// LONG: VAL/HVN + CVD급락 + 매도흡수 → Best Bid 진입 → TP1(VWAP 50%), TP2(VAH 100%)
+    /// SHORT: VAH/HVN + CVD급등 + 매수흡수 → Best Ask 진입 → TP1(VWAP 50%), TP2(VAL 100%)
+    fn check_advanced_orderflow(&self, bar: &RangeBar) -> Option<TradeSignal> {
+        let profile = self.profiles.get(&bar.symbol)?;
+        let flow = self.latest_flow.get(&bar.symbol)?;
+
+        let tick_size = Decimal::ONE;
+        let zone_threshold = tick_size * Decimal::from(5); // 5 ticks
+
+        // ========== LONG 진입 조건 ==========
+        // ① Zone: VAL 또는 HVN 근처
+        let near_val = (bar.close - profile.val).abs() <= zone_threshold;
+        let near_hvn = profile.hvn
+            .map_or(false, |hvn| (bar.close - hvn).abs() <= zone_threshold);
+
+        if (near_val || near_hvn)
+            && flow.cvd_rapid_drop // ② CVD 급락 (매도세 폭발)
+            && flow.absorption_detected
+            && flow.absorption_side == Some(Side::Sell) // ③ 매도 흡수 (Bid >> Ask)
+        {
+            let entry = bar.close;
+            let stop = entry * Decimal::new(996, 3); // -0.4%
+            let tp2 = profile.vah;
+
+            info!(
+                symbol = %bar.symbol,
+                setup = "AdvancedOrderFlow",
+                side = "🟢 LONG",
+                entry = %entry,
+                stop = %stop,
+                tp1_vwap = %profile.vwap,
+                tp2_vah = %tp2,
+                cvd_change = %flow.cvd_1min_change,
+                near_zone = if near_val { "VAL" } else { "HVN" },
+                "🎯 Long: 매도 압축 포착!"
+            );
+
+            return Some(TradeSignal::new(
+                bar.symbol.clone(),
+                Side::Buy,
+                SetupType::AdvancedOrderFlow,
+                entry,
+                stop,
+                tp2,
+                Decimal::try_from(0.85).unwrap_or(Decimal::ONE),
+            ));
+        }
+
+        // ========== SHORT 진입 조건 ==========
+        // ① Zone: VAH 또는 HVN 근처
+        let near_vah = (bar.close - profile.vah).abs() <= zone_threshold;
+
+        if (near_vah || near_hvn)
+            && flow.cvd_rapid_rise // ② CVD 급등 (매수세 폭발)
+            && flow.absorption_detected
+            && flow.absorption_side == Some(Side::Buy) // ③ 매수 흡수 (Ask >> Bid)
+        {
+            let entry = bar.close;
+            let stop = entry * Decimal::new(1004, 3); // +0.4%
+            let tp2 = profile.val;
+
+            info!(
+                symbol = %bar.symbol,
+                setup = "AdvancedOrderFlow",
+                side = "🔴 SHORT",
+                entry = %entry,
+                stop = %stop,
+                tp1_vwap = %profile.vwap,
+                tp2_val = %tp2,
+                cvd_change = %flow.cvd_1min_change,
+                near_zone = if near_vah { "VAH" } else { "HVN" },
+                "🎯 Short: 매수 압축 포착!"
+            );
+
+            return Some(TradeSignal::new(
+                bar.symbol.clone(),
+                Side::Sell,
+                SetupType::AdvancedOrderFlow,
+                entry,
+                stop,
+                tp2,
+                Decimal::try_from(0.85).unwrap_or(Decimal::ONE),
+            ));
+        }
+
+        None
     }
 }

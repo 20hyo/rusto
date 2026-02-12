@@ -1,0 +1,121 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  deploy:
+    name: Deploy to Tokyo EC2 (t4g.small ARM)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} << 'ENDSSH'
+            set -e
+
+            echo "=== Starting Rusto deployment ==="
+
+            # Navigate to application directory
+            cd ~/rusto || cd ~/fabio-trading || {
+              echo "Error: Application directory not found"
+              exit 1
+            }
+
+            # Pull latest changes
+            echo "Pulling latest code..."
+            git fetch origin
+            git reset --hard origin/main
+
+            # Update .env if not exists
+            if [ ! -f .env ]; then
+              cp .env.example .env 2>/dev/null || echo "DISCORD_WEBHOOK_URL=" > .env
+            fi
+
+            # Update DISCORD_WEBHOOK_URL
+            if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+              sed -i "s|DISCORD_WEBHOOK_URL=.*|DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}|" .env
+            fi
+
+            # Load Rust environment
+            source "$HOME/.cargo/env"
+
+            # Build release binary
+            echo "Building release binary..."
+            cargo build --release
+
+            # Restart service
+            echo "Restarting rusto service..."
+            sudo systemctl restart rusto
+
+            # Check status
+            sleep 3
+            sudo systemctl status rusto --no-pager
+
+            echo "=== Deployment completed successfully ==="
+          ENDSSH
+
+      - name: Verify deployment
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh ${EC2_USER}@${EC2_HOST} << 'ENDSSH'
+            # Wait for service to be fully started
+            sleep 5
+
+            # Check if service is running
+            if sudo systemctl is-active --quiet rusto; then
+              echo "✓ Service is running"
+
+              # Show recent logs
+              echo ""
+              echo "Recent logs:"
+              sudo journalctl -u rusto -n 20 --no-pager
+
+              exit 0
+            else
+              echo "✗ Service failed to start"
+              echo ""
+              echo "Error logs:"
+              sudo journalctl -u rusto -n 50 --no-pager
+
+              exit 1
+            fi
+          ENDSSH
+
+      - name: Send deployment notification
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            COLOR=3066993
+            TITLE="✅ Deployment Successful"
+            DESCRIPTION="Rusto bot has been deployed to Tokyo EC2"
+          else
+            COLOR=15158332
+            TITLE="❌ Deployment Failed"
+            DESCRIPTION="Rusto bot deployment failed. Check logs."
+          fi
+
+          curl -H "Content-Type: application/json" \
+            -d "{\"embeds\": [{\"title\": \"$TITLE\", \"description\": \"$DESCRIPTION\", \"color\": $COLOR, \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}" \
+            "$DISCORD_WEBHOOK_URL" || true

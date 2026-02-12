@@ -20,6 +20,8 @@ struct SymbolProfile {
     total_volume: Decimal,
     session_high: Decimal,
     session_low: Decimal,
+    /// Recent trades for VWAP and HVN calculation (last 1 hour)
+    recent_trades: Vec<(DateTime<Utc>, Decimal, Decimal)>, // (timestamp, price, volume)
 }
 
 impl SymbolProfile {
@@ -30,6 +32,7 @@ impl SymbolProfile {
             total_volume: Decimal::ZERO,
             session_high: Decimal::ZERO,
             session_low: Decimal::MAX,
+            recent_trades: Vec::new(),
         }
     }
 
@@ -39,6 +42,57 @@ impl SymbolProfile {
         self.total_volume = Decimal::ZERO;
         self.session_high = Decimal::ZERO;
         self.session_low = Decimal::MAX;
+        self.recent_trades.clear();
+    }
+
+    /// Clean trades older than 1 hour
+    fn clean_old_trades(&mut self, now: DateTime<Utc>) {
+        if let Some(one_hour_ago) = Duration::try_hours(1) {
+            let cutoff = now - one_hour_ago;
+            self.recent_trades.retain(|(ts, _, _)| *ts >= cutoff);
+        }
+    }
+
+    /// Calculate VWAP from recent trades
+    fn calculate_vwap(&self) -> Decimal {
+        if self.recent_trades.is_empty() {
+            return Decimal::ZERO;
+        }
+
+        let mut sum_pv = Decimal::ZERO;
+        let mut sum_v = Decimal::ZERO;
+
+        for (_, price, volume) in &self.recent_trades {
+            sum_pv += price * volume;
+            sum_v += volume;
+        }
+
+        if sum_v == Decimal::ZERO {
+            Decimal::ZERO
+        } else {
+            sum_pv / sum_v
+        }
+    }
+
+    /// Find HVN (High Volume Node) from recent trades
+    /// Returns the price level with highest volume in last 1 hour
+    fn find_hvn(&self, tick_size: Decimal) -> Option<Decimal> {
+        if self.recent_trades.is_empty() {
+            return None;
+        }
+
+        // Group by tick and sum volume
+        let mut tick_volumes: BTreeMap<i64, Decimal> = BTreeMap::new();
+        for (_, price, volume) in &self.recent_trades {
+            let tick = price_to_tick(*price, tick_size);
+            *tick_volumes.entry(tick).or_insert(Decimal::ZERO) += volume;
+        }
+
+        // Find tick with max volume
+        tick_volumes
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1))
+            .map(|(&tick, _)| tick_to_price(tick, tick_size))
     }
 }
 
@@ -73,6 +127,10 @@ impl VolumeProfiler {
         let tick_index = price_to_tick(trade.price, self.tick_size);
         *profile.levels.entry(tick_index).or_insert(Decimal::ZERO) += trade.quantity;
         profile.total_volume += trade.quantity;
+
+        // Add to recent trades for VWAP and HVN
+        profile.recent_trades.push((trade.timestamp, trade.price, trade.quantity));
+        profile.clean_old_trades(trade.timestamp);
 
         if trade.price > profile.session_high {
             profile.session_high = trade.price;
@@ -146,11 +204,17 @@ impl VolumeProfiler {
         let vah = tick_to_price(va_high_tick, self.tick_size);
         let val = tick_to_price(va_low_tick, self.tick_size);
 
+        // Calculate VWAP and HVN
+        let vwap = profile.calculate_vwap();
+        let hvn = profile.find_hvn(self.tick_size);
+
         info!(
             symbol = %symbol,
             poc = %poc,
             vah = %vah,
             val = %val,
+            vwap = %vwap,
+            hvn = ?hvn,
             total_volume = %profile.total_volume,
             "Volume profile updated"
         );
@@ -163,6 +227,8 @@ impl VolumeProfiler {
             total_volume: profile.total_volume,
             session_high: profile.session_high,
             session_low: profile.session_low,
+            vwap,
+            hvn,
             timestamp,
         }
     }

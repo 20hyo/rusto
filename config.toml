@@ -19,25 +19,33 @@ max_price_delta_ticks = 2
 large_volume_multiplier = 2.0
 
 [strategy]
-enabled_setups = ["AAA", "MomentumSqueeze", "AbsorptionReversal"]
+# Available setups: "AAA", "MomentumSqueeze", "AbsorptionReversal", "AdvancedOrderFlow"
+enabled_setups = ["AdvancedOrderFlow"]
 aaa_poc_distance_ticks = 5
 momentum_lookback_bars = 20
 min_delta_confirmation = 1.5
+# AdvancedOrderFlow: Zone filtering distance (ticks from VAL/HVN)
+advanced_zone_ticks = 5
 
 [risk]
 initial_balance = 10000.0
-max_risk_per_trade = 0.01
-daily_loss_limit_pct = 0.03
+max_risk_per_trade = 0.01           # 1% risk per trade
+daily_loss_limit_pct = 0.03         # 3% daily loss limit
 max_concurrent_positions = 3
 break_even_ticks = 3
-default_stop_ticks = 10
+default_stop_ticks = 10             # For non-AdvancedOrderFlow strategies
 default_target_multiplier = 2.0
+# AdvancedOrderFlow uses -0.4% hard stop (calculated automatically for 100x leverage)
 
 [simulator]
 slippage_ticks = 1
 maker_fee = 0.0002
 taker_fee = 0.0004
 order_book_depth = 20
+# Leverage settings (100x futures)
+leverage = 100.0
+margin_type = "Isolated"  # "Isolated" or "Cross"
+maintenance_margin_rate = 0.004  # 0.4% for 100x leverage (Binance standard)
 
 [logging]
 trades_csv_path = "trades.csv"
@@ -46,3 +54,13 @@ trades_db_path = "trades.db"
 
 [discord]
 enabled = true
+
+[binance]
+# Binance Futures API base URL
+api_url = "https://fapi.binance.com"
+# Maximum allowed time offset between local and server time (ms)
+max_time_offset_ms = 500
+# Maximum recommended average latency (ms)
+max_latency_ms = 15.0
+# Number of ping samples for RTT measurement
+ping_samples = 10

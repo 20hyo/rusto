@@ -1,3 +1,4 @@
+use rusto::binance::{ExchangeInfoManager, TimeSyncChecker};
 use rusto::config::AppConfig;
 use rusto::discord::DiscordBot;
 use rusto::market_data::BinanceWebSocket;
@@ -10,7 +11,7 @@ use rusto::strategy::StrategyEngine;
 use rusto::types::{ExecutionEvent, MarketEvent, ProcessingEvent};
 use rusto::volume_profile::VolumeProfiler;
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::info;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,6 +33,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Rusto - Order Flow Trading Bot starting...");
     info!("Symbols: {:?}", config.general.symbols);
+
+    // === Binance Pre-flight Checks ===
+    info!("Running Binance pre-flight checks...");
+
+    // 1. Time synchronization check
+    let time_checker = TimeSyncChecker::new(
+        config.binance.api_url.clone(),
+        config.binance.max_time_offset_ms,
+        config.binance.max_latency_ms,
+        config.binance.ping_samples,
+    );
+
+    let network_stats = match time_checker.check().await {
+        Ok(stats) => {
+            info!(
+                "✓ Time sync OK: offset={}ms, latency={:.2}ms (max: {:.2}ms)",
+                stats.time_offset_ms, stats.avg_latency_ms, stats.max_latency_ms
+            );
+            stats
+        }
+        Err(e) => {
+            error!("✗ Time sync failed: {}", e);
+            eprintln!("\n❌ Time synchronization check failed!");
+            eprintln!("   {}", e);
+            eprintln!("\n   Please ensure:");
+            eprintln!("   1. Your system clock is synchronized (use NTP)");
+            eprintln!("   2. Your network connection to Binance is stable");
+            eprintln!("   3. Check your system time with: date");
+            std::process::exit(1);
+        }
+    };
+
+    // 2. Exchange info sync (symbol filters)
+    let mut exchange_info = ExchangeInfoManager::new(config.binance.api_url.clone());
+
+    match exchange_info.sync().await {
+        Ok(_) => {
+            info!("✓ Exchange info synced: {} symbols loaded", exchange_info.symbols().len());
+
+            // Verify configured symbols are available
+            for symbol in &config.general.symbols {
+                match exchange_info.get_symbol_info(symbol) {
+                    Some(info) => {
+                        info!(
+                            symbol = %symbol,
+                            tick_size = %info.price_tick_size,
+                            step_size = %info.quantity_step_size,
+                            min_notional = %info.min_notional,
+                            "✓ Symbol validated"
+                        );
+                    }
+                    None => {
+                        error!("✗ Symbol {} not found in exchange info", symbol);
+                        eprintln!("\n❌ Symbol {} is not available on Binance Futures!", symbol);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            error!("✗ Exchange info sync failed: {}", e);
+            eprintln!("\n❌ Failed to fetch exchange information from Binance!");
+            eprintln!("   {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    info!("✓ All pre-flight checks passed");
+
+    // Wrap exchange info in Arc for sharing
+    let exchange_info = std::sync::Arc::new(exchange_info);
 
     // Channels
     let (market_tx, _) = broadcast::channel::<MarketEvent>(10_000);
@@ -55,7 +127,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let processing_tx_clone = processing_tx.clone();
 
     // Simulator engine
-    let risk_manager = RiskManager::new(&config.risk);
+    let leverage = rust_decimal::Decimal::try_from(config.simulator.leverage)
+        .unwrap_or(rust_decimal::Decimal::from(100));
+    let risk_manager = RiskManager::new(&config.risk, leverage);
     let trade_logger = TradeLogger::new(
         config.logging.trades_csv_path.clone(),
         config.logging.trades_json_path.clone(),
@@ -63,6 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut simulator = SimulatorEngine::new(config.simulator.clone(), risk_manager, trade_logger);
     simulator.set_execution_channel(execution_tx.clone());
+    simulator.set_exchange_info(exchange_info.clone());
     let market_rx_simulator = market_tx.subscribe();
     let sim_shutdown = shutdown_rx.clone();
 
@@ -73,6 +148,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let discord_bot = DiscordBot::new(webhook_url);
                 let discord_shutdown = shutdown_rx.clone();
                 info!("Discord notifications enabled");
+
+                // Send startup message with network stats
+                info!("Sending startup notification to Discord...");
+                discord_bot.send_startup_message(&network_stats, &config.general.symbols).await;
 
                 Some(tokio::spawn(async move {
                     discord_bot.run(execution_rx, discord_shutdown).await;
