@@ -48,6 +48,9 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          # Upload config.toml from repo to EC2 (ensures latest config is applied)
+          scp -o StrictHostKeyChecking=no config.toml ${EC2_USER}@${EC2_HOST}:/tmp/rusto.config.toml
+
           ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} << 'ENDSSH'
             set -e
 
@@ -79,6 +82,11 @@ jobs:
             echo "Pulling latest code..."
             git fetch origin
             git reset --hard origin/main
+
+            # Overwrite config.toml with the uploaded version from CI (if present)
+            if [ -f /tmp/rusto.config.toml ]; then
+              cp /tmp/rusto.config.toml ~/rusto/config.toml
+            fi
 
             # Update .env if not exists
             if [ ! -f .env ]; then
