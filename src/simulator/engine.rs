@@ -6,7 +6,7 @@ use crate::simulator::position::PositionManager;
 use crate::simulator::trade_log::TradeLogger;
 use crate::types::{
     BotStats, DepthUpdate, ExecutionEvent, MarginType, MarketEvent, NormalizedTrade,
-    ProcessingEvent, TradeSignal,
+    ProcessingEvent, SymbolStats, TradeSignal,
 };
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
@@ -30,6 +30,8 @@ pub struct SimulatorEngine {
     maintenance_margin_rate: Decimal,
     exchange_info: Option<Arc<ExchangeInfoManager>>,
     latest_profiles: BTreeMap<String, VolumeProfileSnapshot>,
+    /// Per-symbol trading statistics
+    symbol_stats: BTreeMap<String, SymbolStats>,
     /// Shared state read by the hourly reporter task
     bot_stats: Option<Arc<Mutex<BotStats>>>,
 }
@@ -62,6 +64,7 @@ impl SimulatorEngine {
             maintenance_margin_rate,
             exchange_info: None,
             latest_profiles: BTreeMap::new(),
+            symbol_stats: BTreeMap::new(),
             bot_stats: None,
         }
     }
@@ -115,6 +118,18 @@ impl SimulatorEngine {
                 s.balance = self.risk_manager.balance();
                 s.daily_pnl = self.risk_manager.daily_pnl();
                 s.open_positions = self.position_manager.open_positions().len();
+                s.total_trades = self.symbol_stats.values().map(|ss| ss.total_trades).sum();
+
+                // Clone symbol stats and set open position counts from live data
+                let mut ss = self.symbol_stats.clone();
+                // Reset open_positions (they are set fresh each sync)
+                for v in ss.values_mut() {
+                    v.open_positions = 0;
+                }
+                for pos in self.position_manager.open_positions() {
+                    ss.entry(pos.symbol.clone()).or_default().open_positions += 1;
+                }
+                s.symbol_stats = ss;
             }
         }
     }
@@ -260,6 +275,7 @@ impl SimulatorEngine {
         for position in &liquidated {
             self.risk_manager.close_position(position);
             self.trade_logger.log_trade(position);
+            self.symbol_stats.entry(position.symbol.clone()).or_default().record_close(position.pnl);
 
             warn!(
                 id = %position.id,
@@ -289,6 +305,7 @@ impl SimulatorEngine {
         for position in &closed {
             self.risk_manager.close_position(position);
             self.trade_logger.log_trade(position);
+            self.symbol_stats.entry(position.symbol.clone()).or_default().record_close(position.pnl);
 
             info!(
                 id = %position.id,
@@ -436,6 +453,7 @@ impl SimulatorEngine {
                         if let Some(pos) = self.position_manager.close_position(&pos_id, tp2, self.fee_rate) {
                             self.risk_manager.close_position(&pos);
                             self.trade_logger.log_trade(&pos);
+                            self.symbol_stats.entry(pos.symbol.clone()).or_default().record_close(pos.pnl);
 
                             info!(
                                 position_id = %pos_id,
@@ -465,6 +483,7 @@ impl SimulatorEngine {
                     if let Some(pos) = self.position_manager.close_position(&pos_id, current_price, self.fee_rate) {
                         self.risk_manager.close_position(&pos);
                         self.trade_logger.log_trade(&pos);
+                        self.symbol_stats.entry(pos.symbol.clone()).or_default().record_close(pos.pnl);
 
                         warn!(
                             position_id = %pos_id,

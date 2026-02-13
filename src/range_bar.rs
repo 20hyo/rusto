@@ -11,6 +11,8 @@ pub struct RangeBarBuilder {
     config: RangeBarConfig,
     /// Per-symbol state
     builders: BTreeMap<String, SymbolBarState>,
+    /// Precomputed ranges override config for dynamically selected symbols
+    precomputed_ranges: BTreeMap<String, Decimal>,
 }
 
 struct SymbolBarState {
@@ -100,16 +102,24 @@ impl RangeBarBuilder {
         Self {
             config,
             builders: BTreeMap::new(),
+            precomputed_ranges: BTreeMap::new(),
         }
+    }
+
+    /// Set a precomputed range for a symbol (overrides config lookup).
+    pub fn set_range(&mut self, symbol: &str, range: Decimal) {
+        self.precomputed_ranges.insert(symbol.to_string(), range);
     }
 
     /// Process a trade and return a completed bar if the range threshold was met.
     pub fn process_trade(&mut self, trade: &NormalizedTrade) -> Option<RangeBar> {
+        let precomputed = self.precomputed_ranges.get(&trade.symbol).copied();
+        let config = &self.config;
         let state = self
             .builders
             .entry(trade.symbol.clone())
             .or_insert_with(|| SymbolBarState {
-                range_size: self.config.range_for(&trade.symbol),
+                range_size: precomputed.unwrap_or_else(|| config.range_for(&trade.symbol)),
                 current: None,
                 bar_count: 0,
             });

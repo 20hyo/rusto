@@ -11,6 +11,8 @@ pub struct VolumeProfiler {
     value_area_pct: Decimal,
     session_reset_hours: i64,
     profiles: BTreeMap<String, SymbolProfile>,
+    /// Per-symbol tick sizes (override the default tick_size)
+    symbol_tick_sizes: BTreeMap<String, Decimal>,
 }
 
 struct SymbolProfile {
@@ -105,11 +107,28 @@ impl VolumeProfiler {
             }),
             session_reset_hours: config.session_reset_hours as i64,
             profiles: BTreeMap::new(),
+            symbol_tick_sizes: BTreeMap::new(),
         }
+    }
+
+    /// Set a per-symbol tick size (overrides the default).
+    pub fn set_tick_size(&mut self, symbol: &str, tick: Decimal) {
+        self.symbol_tick_sizes.insert(symbol.to_string(), tick);
+    }
+
+    /// Get the tick size for a symbol (per-symbol or default).
+    fn tick_size_for(&self, symbol: &str) -> Decimal {
+        self.symbol_tick_sizes
+            .get(symbol)
+            .copied()
+            .unwrap_or(self.tick_size)
     }
 
     /// Add a trade to the volume profile. Returns updated snapshot if enough data.
     pub fn process_trade(&mut self, trade: &NormalizedTrade) -> Option<VolumeProfileSnapshot> {
+        // Get tick size before mutable borrow of profiles
+        let sym_tick = self.tick_size_for(&trade.symbol);
+
         let profile = self
             .profiles
             .entry(trade.symbol.clone())
@@ -124,7 +143,7 @@ impl VolumeProfiler {
         }
 
         // Update profile
-        let tick_index = price_to_tick(trade.price, self.tick_size);
+        let tick_index = price_to_tick(trade.price, sym_tick);
         *profile.levels.entry(tick_index).or_insert(Decimal::ZERO) += trade.quantity;
         profile.total_volume += trade.quantity;
 
@@ -149,6 +168,7 @@ impl VolumeProfiler {
 
     fn compute_snapshot(&self, symbol: &str, timestamp: DateTime<Utc>) -> VolumeProfileSnapshot {
         let profile = &self.profiles[symbol];
+        let sym_tick = self.tick_size_for(symbol);
 
         // Find POC (tick with maximum volume)
         let (&poc_tick, _) = profile
@@ -200,13 +220,13 @@ impl VolumeProfiler {
             }
         }
 
-        let poc = tick_to_price(poc_tick, self.tick_size);
-        let vah = tick_to_price(va_high_tick, self.tick_size);
-        let val = tick_to_price(va_low_tick, self.tick_size);
+        let poc = tick_to_price(poc_tick, sym_tick);
+        let vah = tick_to_price(va_high_tick, sym_tick);
+        let val = tick_to_price(va_low_tick, sym_tick);
 
         // Calculate VWAP and HVN
         let vwap = profile.calculate_vwap();
-        let hvn = profile.find_hvn(self.tick_size);
+        let hvn = profile.find_hvn(sym_tick);
 
         info!(
             symbol = %symbol,

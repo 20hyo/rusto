@@ -256,12 +256,68 @@ impl Position {
     }
 }
 
+/// Per-symbol trading statistics
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SymbolStats {
+    pub total_trades: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub total_pnl: Decimal,
+    pub total_win_pnl: Decimal,
+    pub total_loss_pnl: Decimal,
+    pub open_positions: u32,
+}
+
+impl SymbolStats {
+    pub fn record_close(&mut self, pnl: Decimal) {
+        self.total_trades += 1;
+        self.total_pnl += pnl;
+        if pnl >= Decimal::ZERO {
+            self.wins += 1;
+            self.total_win_pnl += pnl;
+        } else {
+            self.losses += 1;
+            self.total_loss_pnl += pnl;
+        }
+    }
+
+    pub fn win_rate(&self) -> Decimal {
+        if self.total_trades == 0 {
+            return Decimal::ZERO;
+        }
+        Decimal::from(self.wins) * Decimal::from(100) / Decimal::from(self.total_trades)
+    }
+
+    pub fn profit_factor(&self) -> Decimal {
+        if self.total_loss_pnl == Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        self.total_win_pnl / self.total_loss_pnl.abs()
+    }
+
+    pub fn avg_win(&self) -> Decimal {
+        if self.wins == 0 {
+            return Decimal::ZERO;
+        }
+        self.total_win_pnl / Decimal::from(self.wins)
+    }
+
+    pub fn avg_loss(&self) -> Decimal {
+        if self.losses == 0 {
+            return Decimal::ZERO;
+        }
+        self.total_loss_pnl / Decimal::from(self.losses)
+    }
+}
+
 /// Shared bot status read by the hourly reporter task
 #[derive(Debug, Clone, Default)]
 pub struct BotStats {
     pub balance: Decimal,
     pub daily_pnl: Decimal,
     pub open_positions: usize,
+    pub total_trades: u32,
+    pub symbol_stats: BTreeMap<String, SymbolStats>,
 }
 
 /// Events flowing through the processing pipeline
@@ -288,5 +344,7 @@ pub enum ExecutionEvent {
         daily_pnl: Decimal,
         open_positions: usize,
         ping_ms: f64,
+        total_trades: u32,
+        symbol_stats: BTreeMap<String, SymbolStats>,
     },
 }

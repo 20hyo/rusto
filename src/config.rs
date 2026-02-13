@@ -20,10 +20,19 @@ pub struct AppConfig {
 pub struct GeneralConfig {
     pub symbols: Vec<String>,
     pub log_level: String,
+    #[serde(default)]
+    pub auto_select_symbols: bool,
+    #[serde(default = "default_top_n")]
+    pub top_n_symbols: usize,
+}
+
+fn default_top_n() -> usize {
+    20
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RangeBarConfig {
+    pub default_pct: Option<f64>,
     #[serde(flatten)]
     pub symbol_ranges: HashMap<String, f64>,
 }
@@ -38,6 +47,26 @@ impl RangeBarConfig {
             .unwrap_or(10.0);
         Decimal::try_from(val).unwrap_or(Decimal::TEN)
     }
+
+    /// Calculate range for a symbol using its current price.
+    /// Priority: symbol override → default_pct × price → config default.
+    pub fn range_for_with_price(&self, symbol: &str, price: Decimal) -> Decimal {
+        // 1. Symbol-specific override
+        if let Some(&val) = self.symbol_ranges.get(symbol) {
+            return Decimal::try_from(val).unwrap_or(Decimal::TEN);
+        }
+        // 2. Dynamic: default_pct% of price
+        if let Some(pct) = self.default_pct {
+            if let Ok(pct_dec) = Decimal::try_from(pct) {
+                let range = price * pct_dec / Decimal::from(100);
+                if range > Decimal::ZERO {
+                    return range;
+                }
+            }
+        }
+        // 3. Fallback to default key
+        self.range_for(symbol)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -45,6 +74,12 @@ pub struct VolumeProfileConfig {
     pub tick_size: f64,
     pub value_area_pct: f64,
     pub session_reset_hours: u64,
+    #[serde(default = "default_tick_multiplier")]
+    pub tick_multiplier: u32,
+}
+
+fn default_tick_multiplier() -> u32 {
+    10
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -120,8 +155,8 @@ impl AppConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.general.symbols.is_empty() {
-            return Err("At least one symbol must be configured".into());
+        if !self.general.auto_select_symbols && self.general.symbols.is_empty() {
+            return Err("At least one symbol must be configured (or enable auto_select_symbols)".into());
         }
         if self.risk.max_risk_per_trade <= 0.0 || self.risk.max_risk_per_trade > 0.1 {
             return Err("max_risk_per_trade must be between 0 and 0.1".into());

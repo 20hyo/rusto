@@ -1,8 +1,9 @@
 use crate::binance::NetworkStats;
-use crate::types::{ExecutionEvent, Position, Side};
+use crate::types::{ExecutionEvent, Position, Side, SymbolStats};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::json;
+use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
@@ -63,8 +64,8 @@ impl DiscordBot {
             ExecutionEvent::DailyLimitReached { pnl } => {
                 self.send_daily_limit_reached(pnl).await;
             }
-            ExecutionEvent::HourlyReport { balance, daily_pnl, open_positions, ping_ms } => {
-                self.send_hourly_report(balance, daily_pnl, open_positions, ping_ms).await;
+            ExecutionEvent::HourlyReport { balance, daily_pnl, open_positions, ping_ms, total_trades, symbol_stats } => {
+                self.send_hourly_report(balance, daily_pnl, open_positions, ping_ms, total_trades, symbol_stats).await;
             }
         }
     }
@@ -266,6 +267,8 @@ impl DiscordBot {
         daily_pnl: Decimal,
         open_positions: usize,
         ping_ms: f64,
+        total_trades: u32,
+        symbol_stats: BTreeMap<String, SymbolStats>,
     ) {
         let (ping_emoji, ping_status) = if ping_ms < 0.0 {
             ("🔴", "측정 실패")
@@ -291,15 +294,23 @@ impl DiscordBot {
             format!("{:.2}ms", ping_ms)
         };
 
-        let message = format!(
+        // Calculate global win rate
+        let total_wins: u32 = symbol_stats.values().map(|s| s.wins).sum();
+        let global_wr = if total_trades > 0 {
+            (total_wins as f64 / total_trades as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let mut message = format!(
             "🕐 **정각 상태 보고**\n\n\
             📡 **네트워크**\n\
             {} **핑**: {} ({})\n\n\
-            💰 **수익률**\n\
+            💰 **글로벌 요약**\n\
             {} **금일 손익**: ${:.2}\n\
-            **현재 잔고**: ${:.2}\n\
-            **오픈 포지션**: {}개\n\n\
-            ⏰ **보고 시각**: {}",
+            **잔고**: ${:.2}\n\
+            **오픈 포지션**: {}개\n\
+            **총 거래**: {}건 | **승률**: {:.1}%\n",
             ping_emoji,
             ping_display,
             ping_status,
@@ -307,8 +318,52 @@ impl DiscordBot {
             daily_pnl,
             balance,
             open_positions,
-            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            total_trades,
+            global_wr,
         );
+
+        // Per-symbol table (only active symbols: trades > 0 or open > 0)
+        let active: Vec<_> = symbol_stats
+            .iter()
+            .filter(|(_, s)| s.total_trades > 0 || s.open_positions > 0)
+            .collect();
+
+        if !active.is_empty() {
+            message.push_str("\n📊 **심볼별 성과**\n```\n");
+            message.push_str("Symbol  |Trades|WR%  |PnL      |PF  |Open\n");
+            message.push_str("--------|------|-----|---------|-----|----\n");
+
+            for (sym, stats) in &active {
+                let short_sym = sym.trim_end_matches("usdt").to_uppercase();
+                let wr = if stats.total_trades > 0 {
+                    format!("{:>3}%", stats.win_rate().round_dp(0))
+                } else {
+                    "  -".to_string()
+                };
+                let pf = if stats.total_loss_pnl != Decimal::ZERO {
+                    format!("{:.1}", stats.profit_factor())
+                } else {
+                    " - ".to_string()
+                };
+                let pnl_sign = if stats.total_pnl >= Decimal::ZERO { "+" } else { "" };
+                message.push_str(&format!(
+                    "{:<8}|{:>5} |{:>5}|${}{:<7.2}|{:>4} |{:>4}\n",
+                    short_sym,
+                    stats.total_trades,
+                    wr,
+                    pnl_sign,
+                    stats.total_pnl.round_dp(2),
+                    pf,
+                    stats.open_positions,
+                ));
+            }
+            message.push_str("```\n");
+        }
+
+        message.push_str(&format!(
+            "\n⏰ **보고 시각**: {}",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ));
 
         self.send_embed("📊 정각 상태 보고", &message, color).await;
     }

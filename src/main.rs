@@ -33,7 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     info!("Rusto - Order Flow Trading Bot starting...");
-    info!("Symbols: {:?}", config.general.symbols);
+    if config.general.auto_select_symbols {
+        info!("Mode: Auto-select top {} symbols by volume", config.general.top_n_symbols);
+    } else {
+        info!("Symbols: {:?}", config.general.symbols);
+    }
 
     // === Binance Pre-flight Checks ===
     info!("Running Binance pre-flight checks...");
@@ -72,26 +76,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match exchange_info.sync().await {
         Ok(_) => {
             info!("✓ Exchange info synced: {} symbols loaded", exchange_info.symbols().len());
-
-            // Verify configured symbols are available
-            for symbol in &config.general.symbols {
-                match exchange_info.get_symbol_info(symbol) {
-                    Some(info) => {
-                        info!(
-                            symbol = %symbol,
-                            tick_size = %info.price_tick_size,
-                            step_size = %info.quantity_step_size,
-                            min_notional = %info.min_notional,
-                            "✓ Symbol validated"
-                        );
-                    }
-                    None => {
-                        error!("✗ Symbol {} not found in exchange info", symbol);
-                        eprintln!("\n❌ Symbol {} is not available on Binance Futures!", symbol);
-                        std::process::exit(1);
-                    }
-                }
-            }
         }
         Err(e) => {
             error!("✗ Exchange info sync failed: {}", e);
@@ -101,7 +85,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    info!("✓ All pre-flight checks passed");
+    // 3. Determine symbols: auto-select top-N or use config
+    // symbol_prices: map of symbol → last price (used for dynamic range calculation)
+    let (symbols, symbol_prices): (Vec<String>, std::collections::HashMap<String, rust_decimal::Decimal>) =
+        if config.general.auto_select_symbols {
+            match exchange_info.fetch_top_symbols(config.general.top_n_symbols).await {
+                Ok(top) => {
+                    let syms: Vec<String> = top.iter().map(|(s, _)| s.clone()).collect();
+                    let prices: std::collections::HashMap<String, rust_decimal::Decimal> =
+                        top.into_iter().collect();
+                    info!("✓ Auto-selected {} symbols by volume", syms.len());
+                    (syms, prices)
+                }
+                Err(e) => {
+                    error!("✗ Failed to auto-select symbols: {}", e);
+                    eprintln!("\n❌ Auto symbol selection failed, falling back to config symbols");
+                    (config.general.symbols.clone(), std::collections::HashMap::new())
+                }
+            }
+        } else {
+            (config.general.symbols.clone(), std::collections::HashMap::new())
+        };
+
+    // Validate all symbols against exchange info
+    for symbol in &symbols {
+        match exchange_info.get_symbol_info(symbol) {
+            Some(info) => {
+                info!(
+                    symbol = %symbol,
+                    tick_size = %info.price_tick_size,
+                    step_size = %info.quantity_step_size,
+                    min_notional = %info.min_notional,
+                    "✓ Symbol validated"
+                );
+            }
+            None => {
+                error!("✗ Symbol {} not found in exchange info", symbol);
+                eprintln!("\n❌ Symbol {} is not available on Binance Futures!", symbol);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    info!("✓ All pre-flight checks passed ({} symbols)", symbols.len());
 
     // Wrap exchange info in Arc for sharing
     let exchange_info = std::sync::Arc::new(exchange_info);
@@ -113,12 +139,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Market data feed
-    let ws = BinanceWebSocket::new(config.general.symbols.clone(), market_tx.clone());
+    let ws = BinanceWebSocket::new(symbols.clone(), market_tx.clone());
     let ws_shutdown = shutdown_rx.clone();
 
     // Processing components
     let mut range_bar_builder = RangeBarBuilder::new(config.range_bar.clone());
     let mut volume_profiler = VolumeProfiler::new(&config.volume_profile);
+
+    // Set per-symbol range bar sizes and volume profile tick sizes
+    for symbol in &symbols {
+        if let Some(sym_info) = exchange_info.get_symbol_info(symbol) {
+            // Dynamic range bar size: use price if available
+            if let Some(&price) = symbol_prices.get(symbol) {
+                let range = config.range_bar.range_for_with_price(symbol, price);
+                range_bar_builder.set_range(symbol, range);
+                info!(symbol = %symbol, range = %range, price = %price, "Range bar size set");
+            }
+            // Per-symbol VP tick size = exchange tick_size × multiplier
+            let vp_tick = sym_info.price_tick_size * rust_decimal::Decimal::from(config.volume_profile.tick_multiplier);
+            volume_profiler.set_tick_size(symbol, vp_tick);
+            info!(symbol = %symbol, vp_tick = %vp_tick, "Volume profile tick size set");
+        }
+    }
     let mut order_flow_tracker = OrderFlowTracker::new(&config.order_flow);
     let mut strategy_engine =
         StrategyEngine::new(config.strategy.clone(), config.risk.clone());
@@ -156,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Send startup message with network stats
                 info!("Sending startup notification to Discord...");
-                discord_bot.send_startup_message(&network_stats, &config.general.symbols).await;
+                discord_bot.send_startup_message(&network_stats, &symbols).await;
 
                 Some(tokio::spawn(async move {
                     discord_bot.run(execution_rx, discord_shutdown).await;
@@ -210,15 +252,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                    let (balance, daily_pnl, open_positions) = {
+                    let (balance, daily_pnl, open_positions, total_trades, symbol_stats) = {
                         let s = hourly_stats.lock().unwrap();
-                        (s.balance, s.daily_pnl, s.open_positions)
+                        (s.balance, s.daily_pnl, s.open_positions, s.total_trades, s.symbol_stats.clone())
                     };
 
                     info!(
                         balance = %balance,
                         daily_pnl = %daily_pnl,
                         open_positions = open_positions,
+                        total_trades = total_trades,
                         ping_ms = ping_ms,
                         "Hourly report"
                     );
@@ -228,6 +271,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         daily_pnl,
                         open_positions,
                         ping_ms,
+                        total_trades,
+                        symbol_stats,
                     }).await;
                 }
                 _ = shutdown.changed() => {

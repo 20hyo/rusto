@@ -1,17 +1,21 @@
 [general]
 symbols = ["btcusdt", "ethusdt"]
 log_level = "info"
+auto_select_symbols = true
+top_n_symbols = 20
 
 [range_bar]
 # Range size per symbol (USDT price movement per bar)
 btcusdt = 50.0
 ethusdt = 3.0
 default = 10.0
+default_pct = 0.05   # Dynamic range: 0.05% of current price (for auto-selected symbols)
 
 [volume_profile]
 tick_size = 0.1
 value_area_pct = 0.70
 session_reset_hours = 24
+tick_multiplier = 10   # Per-symbol tick = exchange tick_size × multiplier
 
 [order_flow]
 absorption_delta_ratio = 3.0
@@ -31,7 +35,7 @@ advanced_zone_ticks = 5
 initial_balance = 10000.0
 max_risk_per_trade = 0.01           # 1% risk per trade
 daily_loss_limit_pct = 0.03         # 3% daily loss limit
-max_concurrent_positions = 3
+max_concurrent_positions = 5
 break_even_ticks = 3
 default_stop_ticks = 10             # For non-AdvancedOrderFlow strategies
 default_target_multiplier = 2.0

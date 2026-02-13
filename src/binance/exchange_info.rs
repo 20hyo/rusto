@@ -5,6 +5,16 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::{info, warn};
 
+/// 24hr ticker data from /fapi/v1/ticker/24hr
+#[derive(Debug, Deserialize)]
+struct TickerData {
+    symbol: String,
+    #[serde(rename = "quoteVolume")]
+    quote_volume: String,
+    #[serde(rename = "lastPrice")]
+    last_price: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ExchangeInfoResponse {
     symbols: Vec<SymbolData>,
@@ -322,6 +332,77 @@ impl ExchangeInfoManager {
     /// Get all loaded symbols
     pub fn symbols(&self) -> &HashMap<String, SymbolInfo> {
         &self.symbols
+    }
+
+    /// Fetch top N symbols by 24hr quote volume from Binance Futures.
+    /// Must call `sync()` first so that TRADING symbols are loaded.
+    /// Returns Vec<(symbol_lowercase, last_price)>.
+    pub async fn fetch_top_symbols(
+        &self,
+        top_n: usize,
+    ) -> Result<Vec<(String, Decimal)>, String> {
+        let url = format!("{}/fapi/v1/ticker/24hr", self.base_url);
+        info!("Fetching 24hr tickers from {}...", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch 24hr tickers: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "24hr ticker request failed with status: {}",
+                response.status()
+            ));
+        }
+
+        let tickers: Vec<TickerData> = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse 24hr tickers: {}", e))?;
+
+        info!("Received {} tickers", tickers.len());
+
+        // Filter: USDT pairs that are TRADING (present in self.symbols), then sort by quote volume
+        let mut candidates: Vec<(String, Decimal, Decimal)> = tickers
+            .into_iter()
+            .filter_map(|t| {
+                let sym_lower = t.symbol.to_lowercase();
+                // Must end with "usdt" and be in our TRADING symbols
+                if !sym_lower.ends_with("usdt") {
+                    return None;
+                }
+                if !self.symbols.contains_key(&sym_lower) {
+                    return None;
+                }
+                let volume = Decimal::from_str(&t.quote_volume).ok()?;
+                let price = Decimal::from_str(&t.last_price).ok()?;
+                if price <= Decimal::ZERO {
+                    return None;
+                }
+                Some((sym_lower, volume, price))
+            })
+            .collect();
+
+        // Sort by quote volume descending
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Take top N
+        let result: Vec<(String, Decimal)> = candidates
+            .into_iter()
+            .take(top_n)
+            .map(|(sym, _vol, price)| (sym, price))
+            .collect();
+
+        info!(
+            "Auto-selected {} symbols by volume: {:?}",
+            result.len(),
+            result.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>()
+        );
+
+        Ok(result)
     }
 }
 
