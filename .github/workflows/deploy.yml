@@ -16,6 +16,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
 
       - name: Check code
         run: cargo check
@@ -45,11 +47,12 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          cargo build --release
+          cargo build --release --target aarch64-unknown-linux-gnu
+          BINARY_PATH="target/aarch64-unknown-linux-gnu/release/rusto"
 
           # Upload config.toml from repo to EC2 (ensures latest config is applied)
           scp -o StrictHostKeyChecking=no config.toml ${EC2_USER}@${EC2_HOST}:/tmp/rusto.config.toml
-          scp -o StrictHostKeyChecking=no target/release/rusto ${EC2_USER}@${EC2_HOST}:/tmp/rusto-release
+          scp -o StrictHostKeyChecking=no "$BINARY_PATH" ${EC2_USER}@${EC2_HOST}:/tmp/rusto-release
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
             printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL" > /tmp/rusto.env
             scp -o StrictHostKeyChecking=no /tmp/rusto.env ${EC2_USER}@${EC2_HOST}:/tmp/rusto.env
@@ -94,6 +97,13 @@ jobs:
 
             # Deploy release binary
             if [ -f /tmp/rusto-release ]; then
+              echo "Deploying binary:"
+              file /tmp/rusto-release
+              uname -m
+              if ! file /tmp/rusto-release | grep -q "aarch64"; then
+                echo "ERROR: release binary is not aarch64 ELF"
+                exit 1
+              fi
               mv /tmp/rusto-release "$APP_DIR/target/release/rusto"
               chown "$APP_USER:$APP_USER" "$APP_DIR/target/release/rusto"
               chmod +x "$APP_DIR/target/release/rusto"
