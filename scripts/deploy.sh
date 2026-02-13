@@ -122,8 +122,10 @@ RUSTO_SERVICE
     echo "Reloading systemd daemon..."
     sudo systemctl daemon-reload
 
-    # Start service
-    echo "Starting rusto service..."
+    # Force a full restart cycle so the bot is always relaunched
+    echo "Restarting rusto service (stop -> start)..."
+    sudo systemctl stop rusto || true
+    sleep 2
     sudo systemctl start rusto
 
     # Check status

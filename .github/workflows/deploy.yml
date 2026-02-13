@@ -171,7 +171,9 @@ jobs:
 
             # Restart service
             echo "Restarting rusto service..."
-            sudo systemctl restart rusto
+            sudo systemctl stop rusto || true
+            sleep 2
+            sudo systemctl start rusto
 
             # Check status
             sleep 3
