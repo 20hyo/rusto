@@ -8,10 +8,11 @@ use rusto::risk::RiskManager;
 use rusto::simulator::trade_log::TradeLogger;
 use rusto::simulator::SimulatorEngine;
 use rusto::strategy::StrategyEngine;
-use rusto::types::{ExecutionEvent, MarketEvent, ProcessingEvent};
+use rusto::types::{BotStats, ExecutionEvent, MarketEvent, ProcessingEvent};
 use rusto::volume_profile::VolumeProfiler;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -138,7 +139,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut simulator = SimulatorEngine::new(config.simulator.clone(), risk_manager, trade_logger);
     simulator.set_execution_channel(execution_tx.clone());
     simulator.set_exchange_info(exchange_info.clone());
-    simulator.set_binance_url(config.binance.api_url.clone());
+
+    // Shared state between simulator and hourly reporter
+    let bot_stats = Arc::new(Mutex::new(BotStats::default()));
+    simulator.set_bot_stats(bot_stats.clone());
     let market_rx_simulator = market_tx.subscribe();
     let sim_shutdown = shutdown_rx.clone();
 
@@ -168,6 +172,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Discord notifications disabled");
         None
     };
+
+    // Spawn hourly reporter task (independent of market-data loop)
+    let hourly_execution_tx = execution_tx.clone();
+    let hourly_stats = bot_stats.clone();
+    let hourly_ping_url = format!("{}/fapi/v1/ping", config.binance.api_url);
+    let hourly_shutdown = shutdown_rx.clone();
+    let hourly_handle = tokio::spawn(async move {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+
+        // Wait until the next whole-hour boundary (:00)
+        let now = chrono::Utc::now();
+        let secs_past_hour = (now.timestamp() % 3600) as u64;
+        let secs_until_next = if secs_past_hour == 0 { 3600 } else { 3600 - secs_past_hour };
+        info!("Hourly reporter: first report in {}s (next :00)", secs_until_next);
+
+        let start = tokio::time::Instant::now()
+            + tokio::time::Duration::from_secs(secs_until_next);
+        let mut timer = tokio::time::interval_at(start, tokio::time::Duration::from_secs(3600));
+        let mut shutdown = hourly_shutdown;
+
+        loop {
+            tokio::select! {
+                _ = timer.tick() => {
+                    // Ping Binance with timeout
+                    let ping_ms = {
+                        let t = std::time::Instant::now();
+                        match http_client.get(&hourly_ping_url).send().await {
+                            Ok(_) => t.elapsed().as_secs_f64() * 1000.0,
+                            Err(e) => {
+                                warn!("Hourly ping failed: {}", e);
+                                -1.0
+                            }
+                        }
+                    };
+
+                    let (balance, daily_pnl, open_positions) = {
+                        let s = hourly_stats.lock().unwrap();
+                        (s.balance, s.daily_pnl, s.open_positions)
+                    };
+
+                    info!(
+                        balance = %balance,
+                        daily_pnl = %daily_pnl,
+                        open_positions = open_positions,
+                        ping_ms = ping_ms,
+                        "Hourly report"
+                    );
+
+                    let _ = hourly_execution_tx.send(ExecutionEvent::HourlyReport {
+                        balance,
+                        daily_pnl,
+                        open_positions,
+                        ping_ms,
+                    }).await;
+                }
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        info!("Hourly reporter shutting down");
+                        return;
+                    }
+                }
+            }
+        }
+    });
 
     // Spawn WebSocket task
     let ws_handle = tokio::spawn(async move {
@@ -243,9 +314,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for all tasks to complete
     if let Some(discord_handle) = discord_handle {
-        let _ = tokio::join!(ws_handle, processing_handle, sim_handle, discord_handle);
+        let _ = tokio::join!(ws_handle, processing_handle, sim_handle, discord_handle, hourly_handle);
     } else {
-        let _ = tokio::join!(ws_handle, processing_handle, sim_handle);
+        let _ = tokio::join!(ws_handle, processing_handle, sim_handle, hourly_handle);
     }
 
     info!("Rusto shut down cleanly.");

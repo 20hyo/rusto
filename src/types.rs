@@ -256,6 +256,14 @@ impl Position {
     }
 }
 
+/// Shared bot status read by the hourly reporter task
+#[derive(Debug, Clone, Default)]
+pub struct BotStats {
+    pub balance: Decimal,
+    pub daily_pnl: Decimal,
+    pub open_positions: usize,
+}
+
 /// Events flowing through the processing pipeline
 #[derive(Debug, Clone)]
 pub enum ProcessingEvent {
