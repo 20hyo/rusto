@@ -107,7 +107,7 @@ jobs:
             grep -A 10 '^\[general\]' "$APP_DIR/config.toml" || echo "(not found)"
 
             echo "Replacing rusto.service for /home/ec2-user/rusto deployment"
-            sudo printf '%s\n' \
+            printf '%s\n' \
               "[Unit]" \
               "Description=Rusto Trading Bot" \
               "After=network.target" \
@@ -125,7 +125,7 @@ jobs:
               "" \
               "[Install]" \
               "WantedBy=multi-user.target" \
-              > /etc/systemd/system/rusto.service
+              | sudo tee /etc/systemd/system/rusto.service > /dev/null
 
             sudo systemctl daemon-reload
 
