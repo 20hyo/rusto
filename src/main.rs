@@ -87,19 +87,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Determine symbols: auto-select top-N or use config
     // symbol_prices: map of symbol → last price (used for dynamic range calculation)
+    // auto_select_warning: holds an error message to send to Discord if auto-selection failed
+    let mut auto_select_warning: Option<String> = None;
     let (symbols, symbol_prices): (Vec<String>, std::collections::HashMap<String, rust_decimal::Decimal>) =
         if config.general.auto_select_symbols {
             match exchange_info.fetch_top_symbols(config.general.top_n_symbols).await {
-                Ok(top) => {
+                Ok(top) if !top.is_empty() => {
                     let syms: Vec<String> = top.iter().map(|(s, _)| s.clone()).collect();
                     let prices: std::collections::HashMap<String, rust_decimal::Decimal> =
                         top.into_iter().collect();
                     info!("✓ Auto-selected {} symbols by volume", syms.len());
                     (syms, prices)
                 }
+                Ok(_) => {
+                    let msg = "fetch_top_symbols returned empty list — no USDT futures matched TRADING filter".to_string();
+                    error!("✗ Auto-selection returned 0 symbols: {}", msg);
+                    auto_select_warning = Some(msg);
+                    (config.general.symbols.clone(), std::collections::HashMap::new())
+                }
                 Err(e) => {
-                    error!("✗ Failed to auto-select symbols: {}", e);
-                    eprintln!("\n❌ Auto symbol selection failed, falling back to config symbols");
+                    let msg = format!("fetch_top_symbols failed: {}", e);
+                    error!("✗ {}", msg);
+                    eprintln!("\n❌ Auto symbol selection failed, falling back to config symbols\n   {}", e);
+                    auto_select_warning = Some(msg);
                     (config.general.symbols.clone(), std::collections::HashMap::new())
                 }
             }
@@ -199,6 +209,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Send startup message with network stats
                 info!("Sending startup notification to Discord...");
                 discord_bot.send_startup_message(&network_stats, &symbols).await;
+
+                // Warn if auto-selection fell back to config symbols
+                if let Some(ref warn_msg) = auto_select_warning {
+                    discord_bot.send_warning(
+                        "⚠️ 심볼 자동 선택 실패 — config 심볼로 fallback",
+                        &format!("**오류**: {}\n\n**fallback 심볼**: {}\n\n> EC2 로그에서 상세 원인 확인:\n> `sudo journalctl -u rusto -n 50 --no-pager`",
+                            warn_msg,
+                            symbols.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>().join(", ")
+                        ),
+                    ).await;
+                }
 
                 Some(tokio::spawn(async move {
                     discord_bot.run(execution_rx, discord_shutdown).await;

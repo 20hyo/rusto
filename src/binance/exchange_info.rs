@@ -10,9 +10,9 @@ use tracing::{info, warn};
 struct TickerData {
     symbol: String,
     #[serde(rename = "quoteVolume")]
-    quote_volume: String,
+    quote_volume: Option<String>,
     #[serde(rename = "lastPrice")]
-    last_price: String,
+    last_price: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,8 +377,8 @@ impl ExchangeInfoManager {
                 if !self.symbols.contains_key(&sym_lower) {
                     return None;
                 }
-                let volume = Decimal::from_str(&t.quote_volume).ok()?;
-                let price = Decimal::from_str(&t.last_price).ok()?;
+                let volume = t.quote_volume.as_deref().and_then(|v| Decimal::from_str(v).ok())?;
+                let price = t.last_price.as_deref().and_then(|p| Decimal::from_str(p).ok())?;
                 if price <= Decimal::ZERO {
                     return None;
                 }

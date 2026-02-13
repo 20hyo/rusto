@@ -368,6 +368,11 @@ impl DiscordBot {
         self.send_embed("📊 정각 상태 보고", &message, color).await;
     }
 
+    /// Send a warning message (e.g. auto-selection failure)
+    pub async fn send_warning(&self, title: &str, description: &str) {
+        self.send_embed(title, description, 0xFFAA00).await;
+    }
+
     /// Send startup notification with network stats
     pub async fn send_startup_message(&self, stats: &NetworkStats, symbols: &[String]) {
         // Determine ping quality
