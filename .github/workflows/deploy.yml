@@ -148,24 +148,24 @@ jobs:
 
             echo "Replacing rusto.service for /home/ec2-user/rusto deployment"
             sudo tee /etc/systemd/system/rusto.service > /dev/null <<'RUSTO_SERVICE'
-[Unit]
-Description=Rusto Trading Bot
-After=network.target
+            [Unit]
+            Description=Rusto Trading Bot
+            After=network.target
 
-[Service]
-Type=simple
-User=ec2-user
-WorkingDirectory=/home/ec2-user/rusto
-Environment="PATH=/home/ec2-user/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/home/ec2-user/rusto/target/release/rusto
-Restart=always
-RestartSec=10
-StandardOutput=append:/home/ec2-user/rusto/rusto.log
-StandardError=append:/home/ec2-user/rusto/rusto.error.log
+            [Service]
+            Type=simple
+            User=ec2-user
+            WorkingDirectory=/home/ec2-user/rusto
+            Environment="PATH=/home/ec2-user/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+            ExecStart=/home/ec2-user/rusto/target/release/rusto
+            Restart=always
+            RestartSec=10
+            StandardOutput=append:/home/ec2-user/rusto/rusto.log
+            StandardError=append:/home/ec2-user/rusto/rusto.error.log
 
-[Install]
-WantedBy=multi-user.target
-RUSTO_SERVICE
+            [Install]
+            WantedBy=multi-user.target
+            RUSTO_SERVICE
 
             sudo systemctl daemon-reload
 
