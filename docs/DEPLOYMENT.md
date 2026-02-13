@@ -11,7 +11,7 @@ Repository Settings > Secrets and variables > Actions에서 다음 secrets을 �
 - `AWS_SECRET_ACCESS_KEY`: AWS IAM 사용자 Secret Access Key
 - `EC2_SSH_PRIVATE_KEY`: EC2 인스턴스 SSH 개인키 (PEM 파일 내용)
 - `EC2_HOST`: EC2 인스턴스 퍼블릭 IP 또는 도메인
-- `EC2_USER`: EC2 SSH 사용자명 (기본: `rusto`)
+- `EC2_USER`: EC2 SSH 사용자명 (기본: `ec2-user`)
 - `DISCORD_WEBHOOK_URL`: Discord 웹훅 URL
 
 ### 2. EC2 인스턴스 초기 설정
@@ -34,7 +34,7 @@ chmod +x setup-ec2.sh
 sudo ./setup-ec2.sh
 
 # .env 파일 수정
-sudo -u rusto nano /home/rusto/rusto/.env
+sudo -u ec2-user nano /home/ec2-user/rusto/.env
 
 # 서비스 시작
 sudo systemctl enable rusto

@@ -50,11 +50,18 @@ jobs:
         run: |
           # Upload config.toml from repo to EC2 (ensures latest config is applied)
           scp -o StrictHostKeyChecking=no config.toml ${EC2_USER}@${EC2_HOST}:/tmp/rusto.config.toml
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL" > /tmp/rusto.env
+            scp -o StrictHostKeyChecking=no /tmp/rusto.env ${EC2_USER}@${EC2_HOST}:/tmp/rusto.env
+            rm -f /tmp/rusto.env
+          fi
 
           ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} << 'ENDSSH'
             set -e
 
             echo "=== Starting Rusto deployment ==="
+            APP_DIR="/home/ec2-user/rusto"
+            APP_USER="ec2-user"
 
             # Check if Rust is installed
             if [ ! -f "$HOME/.cargo/env" ]; then
@@ -64,18 +71,16 @@ jobs:
             source "$HOME/.cargo/env"
 
             # Navigate to application directory or clone if not exists
-            if [ -d ~/rusto ]; then
-              echo "Found existing rusto directory"
-              cd ~/rusto
-            elif [ -d ~/fabio-trading ]; then
-              echo "Found existing fabio-trading directory, renaming to rusto"
-              mv ~/fabio-trading ~/rusto
-              cd ~/rusto
+            if [ -d "$APP_DIR/.git" ]; then
+              echo "Found existing application directory"
+              cd "$APP_DIR"
+            elif [ -d "$APP_DIR" ]; then
+              echo "Repository directory exists but is not a git repo: $APP_DIR"
+              exit 1
             else
               echo "Repository not found, cloning..."
-              cd ~
-              git clone https://github.com/20hyo/rusto.git
-              cd ~/rusto
+              git clone https://github.com/20hyo/rusto.git "$APP_DIR"
+              cd "$APP_DIR"
             fi
 
             # Pull latest changes
@@ -85,17 +90,28 @@ jobs:
 
             # Overwrite config.toml with the uploaded version from CI (if present)
             if [ -f /tmp/rusto.config.toml ]; then
-              cp /tmp/rusto.config.toml ~/rusto/config.toml
+              cp /tmp/rusto.config.toml "$APP_DIR/config.toml"
+              chown "$APP_USER:$APP_USER" "$APP_DIR/config.toml"
+            fi
+
+            if [ -f /tmp/rusto.env ]; then
+              # shellcheck disable=SC1091
+              . /tmp/rusto.env
             fi
 
             # Update .env if not exists
-            if [ ! -f .env ]; then
-              cp .env.example .env 2>/dev/null || echo "DISCORD_WEBHOOK_URL=" > .env
+            if [ ! -f "$APP_DIR/.env" ]; then
+              cp "$APP_DIR/.env.example" "$APP_DIR/.env" 2>/dev/null || echo "DISCORD_WEBHOOK_URL=" > "$APP_DIR/.env"
+              chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
             fi
 
             # Update DISCORD_WEBHOOK_URL
             if [ -n "$DISCORD_WEBHOOK_URL" ]; then
-              sed -i "s|DISCORD_WEBHOOK_URL=.*|DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}|" .env
+              if grep -q "^DISCORD_WEBHOOK_URL=" "$APP_DIR/.env"; then
+                sed -i "s|^DISCORD_WEBHOOK_URL=.*|DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}|" "$APP_DIR/.env"
+              else
+                echo "DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}" >> "$APP_DIR/.env"
+              fi
             fi
 
             # Load Rust environment
@@ -115,16 +131,43 @@ jobs:
               sudo swapon /swapfile || true
             fi
 
+            if [ ! -f /home/$APP_USER/.cargo/env ]; then
+              sudo -u "$APP_USER" bash -lc "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+            fi
+
             # Show config for debugging
             echo "=== config.toml [general] section ==="
-            grep -A 10 '^\[general\]' config.toml || echo "(not found)"
+            grep -A 10 '^\[general\]' "$APP_DIR/config.toml" || echo "(not found)"
 
             # Build release binary with limited parallelism to avoid OOM
             echo "Building release binary..."
-            cargo build --release -j 1
+            sudo -u "$APP_USER" bash -lc "source /home/$APP_USER/.cargo/env && cd $APP_DIR && cargo build --release -j 1"
 
             # Verify binary was just built (mtime within last 60s)
-            echo "Binary mtime: $(stat -c '%y' target/release/rusto 2>/dev/null || stat -f '%Sm' target/release/rusto)"
+            echo "Binary mtime: $(stat -c '%y' \"$APP_DIR/target/release/rusto\" 2>/dev/null || stat -f '%Sm' \"$APP_DIR/target/release/rusto\")"
+
+            echo "Replacing rusto.service for /home/ec2-user/rusto deployment"
+            sudo tee /etc/systemd/system/rusto.service > /dev/null <<'RUSTO_SERVICE'
+[Unit]
+Description=Rusto Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/rusto
+Environment="PATH=/home/ec2-user/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/ec2-user/rusto/target/release/rusto
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ec2-user/rusto/rusto.log
+StandardError=append:/home/ec2-user/rusto/rusto.error.log
+
+[Install]
+WantedBy=multi-user.target
+RUSTO_SERVICE
+
+            sudo systemctl daemon-reload
 
             # Restart service
             echo "Restarting rusto service..."

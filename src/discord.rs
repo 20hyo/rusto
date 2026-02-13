@@ -443,16 +443,30 @@ impl DiscordBot {
             }]
         });
 
-        if let Err(e) = self
+        let response = match self
             .client
             .post(&self.webhook_url)
             .json(&payload)
             .send()
             .await
         {
-            error!("Failed to send Discord notification: {}", e);
-        } else {
-            info!("Discord notification sent: {}", title);
+            Ok(resp) => resp,
+            Err(e) => {
+                error!("Failed to send Discord notification: {}", e);
+                return;
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read response body".to_string());
+            error!("Discord webhook returned {}: {}", status, body);
+            return;
         }
+
+        info!("Discord notification sent: {}", title);
     }
 }
