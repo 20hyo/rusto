@@ -16,6 +16,8 @@ pub struct StrategyEngine {
     recent_bars: BTreeMap<String, Vec<RangeBar>>,
     /// Latest order flow per symbol
     latest_flow: BTreeMap<String, OrderFlowMetrics>,
+    /// Last bar index where AdvancedOrderFlow signal was emitted (per symbol)
+    last_advanced_signal_bar: BTreeMap<String, u64>,
 }
 
 impl StrategyEngine {
@@ -26,6 +28,7 @@ impl StrategyEngine {
             profiles: BTreeMap::new(),
             recent_bars: BTreeMap::new(),
             latest_flow: BTreeMap::new(),
+            last_advanced_signal_bar: BTreeMap::new(),
         }
     }
 
@@ -50,7 +53,8 @@ impl StrategyEngine {
 
         let mut signals = Vec::new();
 
-        for setup in &self.config.enabled_setups {
+        let enabled_setups = self.config.enabled_setups.clone();
+        for setup in enabled_setups {
             match setup.as_str() {
                 "AAA" => {
                     if let Some(sig) = self.check_aaa(bar) {
@@ -297,23 +301,59 @@ impl StrategyEngine {
     /// AdvancedOrderFlow: "폭발 직전의 압축 포착"
     /// LONG: VAL/HVN + CVD급락 + 매도흡수 → Best Bid 진입 → TP1(VWAP 50%), TP2(VAH 100%)
     /// SHORT: VAH/HVN + CVD급등 + 매수흡수 → Best Ask 진입 → TP1(VWAP 50%), TP2(VAL 100%)
-    fn check_advanced_orderflow(&self, bar: &RangeBar) -> Option<TradeSignal> {
+    fn check_advanced_orderflow(&mut self, bar: &RangeBar) -> Option<TradeSignal> {
         let profile = self.profiles.get(&bar.symbol)?;
         let flow = self.latest_flow.get(&bar.symbol)?;
 
-        let tick_size = Decimal::ONE;
-        let zone_threshold = tick_size * Decimal::from(5); // 5 ticks
+        // Cooldown to avoid rapid-fire signals in noisy conditions.
+        if let Some(last_bar) = self.last_advanced_signal_bar.get(&bar.symbol) {
+            if bar.bar_index.saturating_sub(*last_bar) < self.config.advanced_cooldown_bars as u64 {
+                return None;
+            }
+        }
+
+        let zone_threshold = Decimal::from(self.config.advanced_zone_ticks);
+        let min_imbalance = Decimal::try_from(self.config.advanced_min_imbalance_ratio)
+            .unwrap_or(Decimal::new(18, 1));
+        let min_abs_cvd_change = Decimal::try_from(self.config.advanced_min_cvd_1min_change)
+            .unwrap_or(Decimal::new(5, 0));
+        let min_bar_range_pct = Decimal::try_from(self.config.advanced_min_bar_range_pct)
+            .unwrap_or(Decimal::new(3, 2));
+
+        let bar_range = (bar.high - bar.low).abs();
+        let bar_range_pct = if bar.close > Decimal::ZERO {
+            (bar_range / bar.close) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+        if bar_range_pct < min_bar_range_pct {
+            return None;
+        }
+
+        if flow.cvd_1min_change.abs() < min_abs_cvd_change {
+            return None;
+        }
 
         // ========== LONG 진입 조건 ==========
         // ① Zone: VAL 또는 HVN 근처
         let near_val = (bar.close - profile.val).abs() <= zone_threshold;
         let near_hvn = profile.hvn
             .map_or(false, |hvn| (bar.close - hvn).abs() <= zone_threshold);
+        let reversal_ok_long = !self.config.advanced_require_reversal_bar || bar.close > bar.open;
+        let sell_to_buy_ratio = if flow.imbalance_ratio > Decimal::ZERO {
+            Decimal::ONE / flow.imbalance_ratio
+        } else {
+            Decimal::from(999)
+        };
 
         if (near_val || near_hvn)
             && flow.cvd_rapid_drop // ② CVD 급락 (매도세 폭발)
             && flow.absorption_detected
             && flow.absorption_side == Some(Side::Sell) // ③ 매도 흡수 (Bid >> Ask)
+            && sell_to_buy_ratio >= min_imbalance
+            && reversal_ok_long
+            && profile.vwap > bar.close
+            && profile.vah > profile.vwap
         {
             let entry = bar.close;
             let stop = entry * Decimal::new(996, 3); // -0.4%
@@ -332,6 +372,9 @@ impl StrategyEngine {
                 "🎯 Long: 매도 압축 포착!"
             );
 
+            self.last_advanced_signal_bar
+                .insert(bar.symbol.clone(), bar.bar_index);
+
             return Some(TradeSignal::new(
                 bar.symbol.clone(),
                 Side::Buy,
@@ -346,11 +389,16 @@ impl StrategyEngine {
         // ========== SHORT 진입 조건 ==========
         // ① Zone: VAH 또는 HVN 근처
         let near_vah = (bar.close - profile.vah).abs() <= zone_threshold;
+        let reversal_ok_short = !self.config.advanced_require_reversal_bar || bar.close < bar.open;
 
         if (near_vah || near_hvn)
             && flow.cvd_rapid_rise // ② CVD 급등 (매수세 폭발)
             && flow.absorption_detected
             && flow.absorption_side == Some(Side::Buy) // ③ 매수 흡수 (Ask >> Bid)
+            && flow.imbalance_ratio >= min_imbalance
+            && reversal_ok_short
+            && profile.vwap < bar.close
+            && profile.val < profile.vwap
         {
             let entry = bar.close;
             let stop = entry * Decimal::new(1004, 3); // +0.4%
@@ -368,6 +416,9 @@ impl StrategyEngine {
                 near_zone = if near_vah { "VAH" } else { "HVN" },
                 "🎯 Short: 매수 압축 포착!"
             );
+
+            self.last_advanced_signal_bar
+                .insert(bar.symbol.clone(), bar.bar_index);
 
             return Some(TradeSignal::new(
                 bar.symbol.clone(),

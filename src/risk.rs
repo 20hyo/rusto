@@ -198,4 +198,8 @@ impl RiskManager {
     pub fn daily_pnl(&self) -> Decimal {
         self.daily_pnl
     }
+
+    pub fn initial_balance(&self) -> Decimal {
+        Decimal::try_from(self.config.initial_balance).unwrap_or(Decimal::from(10000))
+    }
 }

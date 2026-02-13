@@ -95,6 +95,42 @@ pub struct StrategyConfig {
     pub aaa_poc_distance_ticks: u32,
     pub momentum_lookback_bars: usize,
     pub min_delta_confirmation: f64,
+    #[serde(default = "default_advanced_zone_ticks")]
+    pub advanced_zone_ticks: u32,
+    #[serde(default = "default_advanced_min_imbalance_ratio")]
+    pub advanced_min_imbalance_ratio: f64,
+    #[serde(default = "default_advanced_min_cvd_1min_change")]
+    pub advanced_min_cvd_1min_change: f64,
+    #[serde(default = "default_advanced_min_bar_range_pct")]
+    pub advanced_min_bar_range_pct: f64,
+    #[serde(default = "default_advanced_cooldown_bars")]
+    pub advanced_cooldown_bars: usize,
+    #[serde(default = "default_advanced_require_reversal_bar")]
+    pub advanced_require_reversal_bar: bool,
+}
+
+fn default_advanced_zone_ticks() -> u32 {
+    5
+}
+
+fn default_advanced_min_imbalance_ratio() -> f64 {
+    1.8
+}
+
+fn default_advanced_min_cvd_1min_change() -> f64 {
+    5.0
+}
+
+fn default_advanced_min_bar_range_pct() -> f64 {
+    0.03
+}
+
+fn default_advanced_cooldown_bars() -> usize {
+    3
+}
+
+fn default_advanced_require_reversal_bar() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]

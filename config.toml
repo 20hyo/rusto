@@ -2,7 +2,7 @@
 symbols = ["btcusdt", "ethusdt"]
 log_level = "info"
 auto_select_symbols = true
-top_n_symbols = 20
+top_n_symbols = 10
 
 [range_bar]
 # Range size per symbol (USDT price movement per bar)
@@ -28,8 +28,13 @@ enabled_setups = ["AdvancedOrderFlow"]
 aaa_poc_distance_ticks = 5
 momentum_lookback_bars = 20
 min_delta_confirmation = 1.5
-# AdvancedOrderFlow: Zone filtering distance (ticks from VAL/HVN)
-advanced_zone_ticks = 5
+# AdvancedOrderFlow filters (win-rate bias: fewer but higher-quality entries)
+advanced_zone_ticks = 3
+advanced_min_imbalance_ratio = 2.2
+advanced_min_cvd_1min_change = 12.0
+advanced_min_bar_range_pct = 0.05
+advanced_cooldown_bars = 8
+advanced_require_reversal_bar = true
 
 [risk]
 initial_balance = 10000.0

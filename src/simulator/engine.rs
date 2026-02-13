@@ -503,18 +503,19 @@ impl SimulatorEngine {
     }
 
     fn shutdown_summary(&mut self) {
-        let closed: Vec<_> = self
+        let finalized: Vec<_> = self
             .position_manager
-            .closed_positions()
+            .finalized_positions()
             .into_iter()
             .cloned()
             .collect();
-        self.trade_logger.print_summary(&closed);
+        self.trade_logger
+            .print_summary(&finalized, self.risk_manager.initial_balance());
 
         info!(
             balance = %self.risk_manager.balance(),
             daily_pnl = %self.risk_manager.daily_pnl(),
-            total_trades = closed.len(),
+            total_trades = finalized.len(),
             "Final summary"
         );
     }

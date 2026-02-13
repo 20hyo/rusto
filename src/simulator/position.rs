@@ -246,6 +246,14 @@ impl PositionManager {
             .collect()
     }
 
+    /// Get all finalized positions (closed + liquidated)
+    pub fn finalized_positions(&self) -> Vec<&Position> {
+        self.positions
+            .iter()
+            .filter(|p| p.status == PositionStatus::Closed || p.status == PositionStatus::Liquidated)
+            .collect()
+    }
+
     /// Check if any position should be liquidated based on liquidation price
     pub fn check_liquidations(&mut self, symbol: &str, mark_price: Decimal, fee_rate: Decimal) -> Vec<Position> {
         let ids_to_liquidate: Vec<String> = self
