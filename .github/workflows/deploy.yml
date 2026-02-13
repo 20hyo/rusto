@@ -16,8 +16,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
 
       - name: Check code
         run: cargo check
@@ -47,8 +45,13 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          cargo build --release --target aarch64-unknown-linux-gnu
-          BINARY_PATH="target/aarch64-unknown-linux-gnu/release/rusto"
+          BINARY_PATH="dist/rusto"
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "Missing prebuilt binary: $BINARY_PATH"
+            echo "Build locally for ARM and place binary at dist/rusto before push."
+            exit 1
+          fi
+          chmod +x "$BINARY_PATH"
 
           # Upload config.toml from repo to EC2 (ensures latest config is applied)
           scp -o StrictHostKeyChecking=no config.toml ${EC2_USER}@${EC2_HOST}:/tmp/rusto.config.toml
