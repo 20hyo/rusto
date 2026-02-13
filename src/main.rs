@@ -33,10 +33,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     info!("Rusto - Order Flow Trading Bot starting...");
+    info!(
+        "Config: auto_select_symbols={}, top_n_symbols={}, symbols={:?}",
+        config.general.auto_select_symbols,
+        config.general.top_n_symbols,
+        config.general.symbols,
+    );
     if config.general.auto_select_symbols {
         info!("Mode: Auto-select top {} symbols by volume", config.general.top_n_symbols);
     } else {
-        info!("Symbols: {:?}", config.general.symbols);
+        info!("Mode: Manual symbols from config: {:?}", config.general.symbols);
     }
 
     // === Binance Pre-flight Checks ===

@@ -107,9 +107,16 @@ jobs:
               sudo swapon /swapfile || true
             fi
 
+            # Show config for debugging
+            echo "=== config.toml [general] section ==="
+            grep -A 10 '^\[general\]' config.toml || echo "(not found)"
+
             # Build release binary with limited parallelism to avoid OOM
             echo "Building release binary..."
             cargo build --release -j 1
+
+            # Verify binary was just built (mtime within last 60s)
+            echo "Binary mtime: $(stat -c '%y' target/release/rusto 2>/dev/null || stat -f '%Sm' target/release/rusto)"
 
             # Restart service
             echo "Restarting rusto service..."

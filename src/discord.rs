@@ -409,7 +409,7 @@ impl DiscordBot {
             {} **시간 동기화**: {}ms 오프셋 ({})\n\
             **측정 샘플**: {}회\n\n\
             💹 **거래 설정**\n\
-            **심볼**: {}\n\
+            **심볼 수**: {}개 — {}\n\
             **모드**: 페이퍼 트레이딩 (시뮬레이션)\n\n\
             ⏰ **시작 시간**: {}\n\n\
             ✅ 모든 Pre-flight 체크 통과. 매매 시작합니다!",
@@ -422,6 +422,7 @@ impl DiscordBot {
             stats.time_offset_ms,
             sync_status,
             stats.samples,
+            symbols.len(),
             symbols_list,
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         );
