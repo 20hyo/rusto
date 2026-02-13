@@ -138,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut simulator = SimulatorEngine::new(config.simulator.clone(), risk_manager, trade_logger);
     simulator.set_execution_channel(execution_tx.clone());
     simulator.set_exchange_info(exchange_info.clone());
+    simulator.set_binance_url(config.binance.api_url.clone());
     let market_rx_simulator = market_tx.subscribe();
     let sim_shutdown = shutdown_rx.clone();
 

@@ -274,4 +274,11 @@ pub enum ExecutionEvent {
     TP1Filled { position_id: String, tp1_price: Decimal, partial_pnl: Decimal },
     StopMoved { position_id: String, new_stop: Decimal },
     DailyLimitReached { pnl: Decimal },
+    /// Hourly status report: network ping + current PnL
+    HourlyReport {
+        balance: Decimal,
+        daily_pnl: Decimal,
+        open_positions: usize,
+        ping_ms: f64,
+    },
 }

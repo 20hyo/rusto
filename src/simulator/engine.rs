@@ -11,6 +11,7 @@ use crate::types::{
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -30,6 +31,8 @@ pub struct SimulatorEngine {
     maintenance_margin_rate: Decimal,
     exchange_info: Option<Arc<ExchangeInfoManager>>,
     latest_profiles: BTreeMap<String, VolumeProfileSnapshot>,
+    http_client: reqwest::Client,
+    binance_ping_url: Option<String>,
 }
 
 impl SimulatorEngine {
@@ -60,6 +63,8 @@ impl SimulatorEngine {
             maintenance_margin_rate,
             exchange_info: None,
             latest_profiles: BTreeMap::new(),
+            http_client: reqwest::Client::new(),
+            binance_ping_url: None,
         }
     }
 
@@ -71,6 +76,10 @@ impl SimulatorEngine {
         self.exchange_info = Some(exchange_info);
     }
 
+    pub fn set_binance_url(&mut self, api_url: String) {
+        self.binance_ping_url = Some(format!("{}/fapi/v1/ping", api_url));
+    }
+
     /// Main loop: consume processing events and market events
     pub async fn run(
         &mut self,
@@ -79,6 +88,17 @@ impl SimulatorEngine {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
         info!("Simulator engine started");
+
+        // Schedule hourly report at next whole-hour boundary
+        let now = chrono::Utc::now();
+        let secs_past_hour = (now.timestamp() % 3600) as u64;
+        let secs_until_next_hour = if secs_past_hour == 0 { 3600 } else { 3600 - secs_past_hour };
+        let timer_start = tokio::time::Instant::now()
+            + tokio::time::Duration::from_secs(secs_until_next_hour);
+        let mut hourly_timer = tokio::time::interval_at(
+            timer_start,
+            tokio::time::Duration::from_secs(3600),
+        );
 
         loop {
             tokio::select! {
@@ -90,6 +110,10 @@ impl SimulatorEngine {
                 Ok(event) = market_rx.recv() => {
                     self.handle_market_event(event);
                 }
+                // Hourly status report
+                _ = hourly_timer.tick() => {
+                    self.send_hourly_report().await;
+                }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         info!("Simulator engine shutting down");
@@ -98,6 +122,47 @@ impl SimulatorEngine {
                     }
                 }
             }
+        }
+    }
+
+    /// Ping Binance /fapi/v1/ping and return latency in ms (-1.0 on error)
+    async fn measure_ping(&self) -> f64 {
+        let url = match &self.binance_ping_url {
+            Some(u) => u.clone(),
+            None => return -1.0,
+        };
+        let start = Instant::now();
+        match self.http_client.get(&url).send().await {
+            Ok(_) => start.elapsed().as_secs_f64() * 1000.0,
+            Err(e) => {
+                warn!("Hourly ping failed: {}", e);
+                -1.0
+            }
+        }
+    }
+
+    /// Build and send hourly status report via execution channel
+    async fn send_hourly_report(&self) {
+        let balance = self.risk_manager.balance();
+        let daily_pnl = self.risk_manager.daily_pnl();
+        let open_positions = self.position_manager.open_positions().len();
+        let ping_ms = self.measure_ping().await;
+
+        info!(
+            balance = %balance,
+            daily_pnl = %daily_pnl,
+            open_positions = open_positions,
+            ping_ms = ping_ms,
+            "Hourly report"
+        );
+
+        if let Some(tx) = &self.execution_tx {
+            let _ = tx.send(ExecutionEvent::HourlyReport {
+                balance,
+                daily_pnl,
+                open_positions,
+                ping_ms,
+            }).await;
         }
     }
 

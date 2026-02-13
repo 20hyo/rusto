@@ -63,6 +63,9 @@ impl DiscordBot {
             ExecutionEvent::DailyLimitReached { pnl } => {
                 self.send_daily_limit_reached(pnl).await;
             }
+            ExecutionEvent::HourlyReport { balance, daily_pnl, open_positions, ping_ms } => {
+                self.send_hourly_report(balance, daily_pnl, open_positions, ping_ms).await;
+            }
         }
     }
 
@@ -255,6 +258,59 @@ impl DiscordBot {
         );
 
         self.send_embed("일일 한도 도달", &message, 0xFF0000).await;
+    }
+
+    async fn send_hourly_report(
+        &self,
+        balance: Decimal,
+        daily_pnl: Decimal,
+        open_positions: usize,
+        ping_ms: f64,
+    ) {
+        let (ping_emoji, ping_status) = if ping_ms < 0.0 {
+            ("🔴", "측정 실패")
+        } else if ping_ms < 10.0 {
+            ("🟢", "매우 좋음")
+        } else if ping_ms < 20.0 {
+            ("🟡", "양호")
+        } else if ping_ms < 50.0 {
+            ("🟠", "보통")
+        } else {
+            ("🔴", "느림")
+        };
+
+        let (pnl_emoji, color) = if daily_pnl >= Decimal::ZERO {
+            ("📈", 0x00FF00)
+        } else {
+            ("📉", 0xFF4444)
+        };
+
+        let ping_display = if ping_ms < 0.0 {
+            "N/A".to_string()
+        } else {
+            format!("{:.2}ms", ping_ms)
+        };
+
+        let message = format!(
+            "🕐 **정각 상태 보고**\n\n\
+            📡 **네트워크**\n\
+            {} **핑**: {} ({})\n\n\
+            💰 **수익률**\n\
+            {} **금일 손익**: ${:.2}\n\
+            **현재 잔고**: ${:.2}\n\
+            **오픈 포지션**: {}개\n\n\
+            ⏰ **보고 시각**: {}",
+            ping_emoji,
+            ping_display,
+            ping_status,
+            pnl_emoji,
+            daily_pnl,
+            balance,
+            open_positions,
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        );
+
+        self.send_embed("📊 정각 상태 보고", &message, color).await;
     }
 
     /// Send startup notification with network stats
