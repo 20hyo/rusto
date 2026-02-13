@@ -23,9 +23,6 @@ jobs:
       - name: Run tests
         run: cargo test
 
-      - name: Build release
-        run: cargo build --release
-
   deploy:
     name: Deploy to Tokyo EC2 (t4g.small ARM)
     runs-on: ubuntu-latest
@@ -48,8 +45,11 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          cargo build --release
+
           # Upload config.toml from repo to EC2 (ensures latest config is applied)
           scp -o StrictHostKeyChecking=no config.toml ${EC2_USER}@${EC2_HOST}:/tmp/rusto.config.toml
+          scp -o StrictHostKeyChecking=no target/release/rusto ${EC2_USER}@${EC2_HOST}:/tmp/rusto-release
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
             printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL" > /tmp/rusto.env
             scp -o StrictHostKeyChecking=no /tmp/rusto.env ${EC2_USER}@${EC2_HOST}:/tmp/rusto.env
@@ -63,30 +63,8 @@ jobs:
             APP_DIR="/home/ec2-user/rusto"
             APP_USER="ec2-user"
 
-            # Check if Rust is installed
-            if [ ! -f "$HOME/.cargo/env" ]; then
-              echo "Installing Rust..."
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            fi
-            source "$HOME/.cargo/env"
-
-            # Navigate to application directory or clone if not exists
-            if [ -d "$APP_DIR/.git" ]; then
-              echo "Found existing application directory"
-              cd "$APP_DIR"
-            elif [ -d "$APP_DIR" ]; then
-              echo "Repository directory exists but is not a git repo: $APP_DIR"
-              exit 1
-            else
-              echo "Repository not found, cloning..."
-              git clone https://github.com/20hyo/rusto.git "$APP_DIR"
-              cd "$APP_DIR"
-            fi
-
-            # Pull latest changes
-            echo "Pulling latest code..."
-            git fetch origin
-            git reset --hard origin/main
+            mkdir -p "$APP_DIR"
+            mkdir -p "$APP_DIR/target/release"
 
             # Overwrite config.toml with the uploaded version from CI (if present)
             if [ -f /tmp/rusto.config.toml ]; then
@@ -114,37 +92,19 @@ jobs:
               fi
             fi
 
-            # Load Rust environment
-            source "$HOME/.cargo/env"
-
-            # Check and create swap if needed (for low-memory instances)
-            if [ ! -f /swapfile ]; then
-              echo "Creating swap file for build (requires sudo)..."
-              sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
-              sudo chmod 600 /swapfile
-              sudo mkswap /swapfile
-              sudo swapon /swapfile
-              echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-              echo "Swap created successfully"
+            # Deploy release binary
+            if [ -f /tmp/rusto-release ]; then
+              mv /tmp/rusto-release "$APP_DIR/target/release/rusto"
+              chown "$APP_USER:$APP_USER" "$APP_DIR/target/release/rusto"
+              chmod +x "$APP_DIR/target/release/rusto"
             else
-              echo "Swap already exists"
-              sudo swapon /swapfile || true
-            fi
-
-            if [ ! -f /home/$APP_USER/.cargo/env ]; then
-              sudo -u "$APP_USER" bash -lc "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+              echo "Release binary not found: /tmp/rusto-release"
+              exit 1
             fi
 
             # Show config for debugging
             echo "=== config.toml [general] section ==="
             grep -A 10 '^\[general\]' "$APP_DIR/config.toml" || echo "(not found)"
-
-            # Build release binary with limited parallelism to avoid OOM
-            echo "Building release binary..."
-            sudo -u "$APP_USER" bash -lc "source /home/$APP_USER/.cargo/env && cd $APP_DIR && cargo build --release -j 1"
-
-            # Verify binary was just built (mtime within last 60s)
-            echo "Binary mtime: $(stat -c '%y' \"$APP_DIR/target/release/rusto\" 2>/dev/null || stat -f '%Sm' \"$APP_DIR/target/release/rusto\")"
 
             echo "Replacing rusto.service for /home/ec2-user/rusto deployment"
             sudo tee /etc/systemd/system/rusto.service > /dev/null <<'RUSTO_SERVICE'
