@@ -110,6 +110,9 @@ pub struct OrderFlowMetrics {
     pub cvd_1min_change: Decimal,    // CVD change over last 1 minute
     pub cvd_rapid_drop: bool,        // True if CVD dropped rapidly (sell-side explosion)
     pub cvd_rapid_rise: bool,        // True if CVD rose rapidly (buy-side explosion)
+    pub avg_bar_volume: Decimal,     // Per-symbol rolling average bar volume
+    pub volume_burst_ratio: Decimal, // current volume / avg_bar_volume
+    pub volume_burst: bool,          // True if current volume is bursting vs symbol baseline
     pub timestamp: DateTime<Utc>,
 }
 

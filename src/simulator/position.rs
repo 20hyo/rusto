@@ -192,13 +192,13 @@ impl PositionManager {
     }
 
     /// Move stop to break-even for a position
-    pub fn move_stop_to_break_even(&mut self, position_id: &str) -> bool {
+    pub fn move_stop_to_break_even(&mut self, position_id: &str, stop_price: Decimal) -> bool {
         if let Some(pos) = self
             .positions
             .iter_mut()
             .find(|p| p.id == position_id && p.status == PositionStatus::Open)
         {
-            pos.stop_loss = pos.entry_price;
+            pos.stop_loss = stop_price;
             pos.break_even_moved = true;
             true
         } else {
@@ -207,14 +207,14 @@ impl PositionManager {
     }
 
     /// Mark TP1 as filled and move stop to break-even
-    pub fn mark_tp1_filled(&mut self, position_id: &str, entry_price: Decimal) -> bool {
+    pub fn mark_tp1_filled(&mut self, position_id: &str, stop_price: Decimal) -> bool {
         if let Some(pos) = self
             .positions
             .iter_mut()
             .find(|p| p.id == position_id && p.status == PositionStatus::Open)
         {
             pos.tp1_filled = true;
-            pos.stop_loss = entry_price;
+            pos.stop_loss = stop_price;
             pos.break_even_moved = true;
             true
         } else {

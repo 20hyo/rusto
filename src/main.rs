@@ -10,6 +10,7 @@ use rusto::simulator::SimulatorEngine;
 use rusto::strategy::StrategyEngine;
 use rusto::types::{BotStats, ExecutionEvent, MarketEvent, ProcessingEvent};
 use rusto::volume_profile::VolumeProfiler;
+use chrono::{Days, FixedOffset, Timelike};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{error, info, warn};
@@ -95,15 +96,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // symbol_prices: map of symbol → last price (used for dynamic range calculation)
     let (symbols, symbol_prices): (Vec<String>, std::collections::HashMap<String, rust_decimal::Decimal>) =
         if config.general.auto_select_symbols {
-            match exchange_info.fetch_top_symbols(config.general.top_n_symbols).await {
-                Ok(top) if top.len() >= config.general.top_n_symbols => {
+            let top_n = 10usize;
+            if config.general.top_n_symbols != top_n {
+                warn!(
+                    configured = config.general.top_n_symbols,
+                    forced = top_n,
+                    "Auto-select is forced to top 10 symbols for futures strategy"
+                );
+            }
+
+            let kst = FixedOffset::east_opt(9 * 3600)
+                .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC offset should be valid"));
+            let now_kst = chrono::Utc::now().with_timezone(&kst);
+            info!(
+                selection_time_kst = %now_kst.format("%Y-%m-%d %H:%M:%S %:z"),
+                "Selecting Binance Futures top symbols (KST snapshot)"
+            );
+
+            match exchange_info.fetch_top_symbols(top_n).await {
+                Ok(top) if top.len() >= top_n => {
                     let syms: Vec<String> = top.iter().map(|(s, _)| s.clone()).collect();
                     let prices: std::collections::HashMap<String, rust_decimal::Decimal> =
                         top.into_iter().collect();
                     info!(
                         "✓ Auto-selected {} symbols by volume (requested: {})",
                         syms.len(),
-                        config.general.top_n_symbols
+                        top_n
                     );
                     (syms, prices)
                 }
@@ -111,12 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     error!(
                         "✗ Auto-selection returned too few symbols: got {}, required {}",
                         top.len(),
-                        config.general.top_n_symbols
+                        top_n
                     );
                     eprintln!(
                         "\n❌ Auto symbol selection returned too few symbols (got {}, required {}).\n   Aborting to avoid fallback to manual symbols.",
                         top.len(),
-                        config.general.top_n_symbols
+                        top_n
                     );
                     std::process::exit(1);
                 }
@@ -189,7 +207,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut order_flow_tracker = OrderFlowTracker::new(&config.order_flow);
     let mut strategy_engine =
-        StrategyEngine::new(config.strategy.clone(), config.risk.clone());
+        StrategyEngine::new(
+            config.strategy.clone(),
+            config.risk.clone(),
+            Some(config.logging.trades_db_path.clone()),
+        );
 
     let mut market_rx_processing = market_tx.subscribe();
     let processing_shutdown = shutdown_rx.clone();
@@ -316,6 +338,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws.run(ws_shutdown).await;
     });
 
+    // Spawn KST 09:00 reselection task (graceful shutdown so supervisor can restart with new top-10)
+    let reselection_exchange_info = exchange_info.clone();
+    let reselection_shutdown_tx = shutdown_tx.clone();
+    let reselection_shutdown = shutdown_rx.clone();
+    let reselection_handle = tokio::spawn(async move {
+        let mut shutdown = reselection_shutdown;
+        let kst = FixedOffset::east_opt(9 * 3600)
+            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC offset should be valid"));
+
+        loop {
+            let now_utc = chrono::Utc::now();
+            let now_kst = now_utc.with_timezone(&kst);
+            let today_9 = now_kst
+                .date_naive()
+                .and_hms_opt(9, 0, 0)
+                .unwrap_or_else(|| now_kst.naive_local());
+            let next_9 = if now_kst.time().hour() < 9 {
+                today_9
+            } else {
+                now_kst
+                    .date_naive()
+                    .checked_add_days(Days::new(1))
+                    .and_then(|d| d.and_hms_opt(9, 0, 0))
+                    .unwrap_or(today_9)
+            };
+
+            let wait_secs = (next_9 - now_kst.naive_local()).num_seconds().max(1) as u64;
+            info!("KST 09:00 reselection scheduler: next run in {}s", wait_secs);
+
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)) => {
+                    match reselection_exchange_info.fetch_top_symbols(10).await {
+                        Ok(top) => {
+                            info!(
+                                symbols = ?top.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(),
+                                "KST 09:00 symbol reselection complete; triggering graceful restart to apply"
+                            );
+                        }
+                        Err(e) => {
+                            warn!("KST 09:00 symbol reselection failed: {}", e);
+                        }
+                    }
+                    let _ = reselection_shutdown_tx.send(true);
+                    return;
+                }
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
     // Spawn processing task
     let processing_handle = tokio::spawn(async move {
         let mut shutdown = processing_shutdown;
@@ -385,9 +461,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for all tasks to complete
     if let Some(discord_handle) = discord_handle {
-        let _ = tokio::join!(ws_handle, processing_handle, sim_handle, discord_handle, hourly_handle);
+        let _ = tokio::join!(
+            ws_handle,
+            processing_handle,
+            sim_handle,
+            discord_handle,
+            hourly_handle,
+            reselection_handle
+        );
     } else {
-        let _ = tokio::join!(ws_handle, processing_handle, sim_handle, hourly_handle);
+        let _ = tokio::join!(
+            ws_handle,
+            processing_handle,
+            sim_handle,
+            hourly_handle,
+            reselection_handle
+        );
     }
 
     info!("Rusto shut down cleanly.");

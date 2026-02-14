@@ -87,6 +87,18 @@ pub struct OrderFlowConfig {
     pub absorption_delta_ratio: f64,
     pub max_price_delta_ticks: u32,
     pub large_volume_multiplier: f64,
+    #[serde(default = "default_volume_baseline_bars")]
+    pub volume_baseline_bars: usize,
+    #[serde(default = "default_volume_burst_multiplier")]
+    pub volume_burst_multiplier: f64,
+}
+
+fn default_volume_baseline_bars() -> usize {
+    40
+}
+
+fn default_volume_burst_multiplier() -> f64 {
+    1.8
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -107,6 +119,20 @@ pub struct StrategyConfig {
     pub advanced_cooldown_bars: usize,
     #[serde(default = "default_advanced_require_reversal_bar")]
     pub advanced_require_reversal_bar: bool,
+    #[serde(default = "default_advanced_min_volume_burst_ratio")]
+    pub advanced_min_volume_burst_ratio: f64,
+    #[serde(default = "default_advanced_auto_tune_volume_burst")]
+    pub advanced_auto_tune_volume_burst: bool,
+    #[serde(default = "default_advanced_tuning_lookback_bars")]
+    pub advanced_tuning_lookback_bars: usize,
+    #[serde(default = "default_advanced_tuning_lookahead_bars")]
+    pub advanced_tuning_lookahead_bars: usize,
+    #[serde(default = "default_advanced_tuning_stop_pct")]
+    pub advanced_tuning_stop_pct: f64,
+    #[serde(default = "default_advanced_tuning_target_pct")]
+    pub advanced_tuning_target_pct: f64,
+    #[serde(default = "default_advanced_tuning_min_trades")]
+    pub advanced_tuning_min_trades: usize,
 }
 
 fn default_advanced_zone_ticks() -> u32 {
@@ -133,6 +159,34 @@ fn default_advanced_require_reversal_bar() -> bool {
     true
 }
 
+fn default_advanced_min_volume_burst_ratio() -> f64 {
+    1.8
+}
+
+fn default_advanced_auto_tune_volume_burst() -> bool {
+    true
+}
+
+fn default_advanced_tuning_lookback_bars() -> usize {
+    120
+}
+
+fn default_advanced_tuning_lookahead_bars() -> usize {
+    8
+}
+
+fn default_advanced_tuning_stop_pct() -> f64 {
+    0.20
+}
+
+fn default_advanced_tuning_target_pct() -> f64 {
+    0.35
+}
+
+fn default_advanced_tuning_min_trades() -> usize {
+    8
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct RiskConfig {
     pub initial_balance: f64,
@@ -140,8 +194,26 @@ pub struct RiskConfig {
     pub daily_loss_limit_pct: f64,
     pub max_concurrent_positions: usize,
     pub break_even_ticks: u32,
+    #[serde(default = "default_break_even_min_hold_secs")]
+    pub break_even_min_hold_secs: u64,
+    #[serde(default = "default_break_even_trigger_rr")]
+    pub break_even_trigger_rr: f64,
+    #[serde(default = "default_break_even_profit_lock_ticks")]
+    pub break_even_profit_lock_ticks: u32,
     pub default_stop_ticks: u32,
     pub default_target_multiplier: f64,
+}
+
+fn default_break_even_min_hold_secs() -> u64 {
+    45
+}
+
+fn default_break_even_trigger_rr() -> f64 {
+    1.2
+}
+
+fn default_break_even_profit_lock_ticks() -> u32 {
+    1
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -153,6 +225,18 @@ pub struct SimulatorConfig {
     pub leverage: f64,
     pub margin_type: String,
     pub maintenance_margin_rate: f64,
+    #[serde(default = "default_soft_stop_seconds")]
+    pub soft_stop_seconds: u64,
+    #[serde(default = "default_soft_stop_drawdown_pct")]
+    pub soft_stop_drawdown_pct: f64,
+}
+
+fn default_soft_stop_seconds() -> u64 {
+    45
+}
+
+fn default_soft_stop_drawdown_pct() -> f64 {
+    0.15
 }
 
 #[derive(Debug, Deserialize, Clone)]

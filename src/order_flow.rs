@@ -10,10 +10,14 @@ pub struct OrderFlowTracker {
     absorption_delta_ratio: Decimal,
     max_price_delta_ticks: Decimal,
     large_volume_multiplier: Decimal,
+    volume_baseline_bars: usize,
+    volume_burst_multiplier: Decimal,
     /// Per-symbol cumulative volume delta
     cvd: BTreeMap<String, Decimal>,
     /// Recent bar deltas for average calculation
     recent_deltas: BTreeMap<String, Vec<Decimal>>,
+    /// Recent bar volumes for per-symbol burst detection
+    recent_volumes: BTreeMap<String, Vec<Decimal>>,
     /// CVD history for 1-minute tracking (timestamp, cvd_value)
     cvd_history: BTreeMap<String, Vec<(DateTime<Utc>, Decimal)>>,
 }
@@ -26,8 +30,12 @@ impl OrderFlowTracker {
             max_price_delta_ticks: Decimal::from(config.max_price_delta_ticks),
             large_volume_multiplier: Decimal::try_from(config.large_volume_multiplier)
                 .unwrap_or(Decimal::TWO),
+            volume_baseline_bars: config.volume_baseline_bars.max(5),
+            volume_burst_multiplier: Decimal::try_from(config.volume_burst_multiplier)
+                .unwrap_or(Decimal::new(18, 1)),
             cvd: BTreeMap::new(),
             recent_deltas: BTreeMap::new(),
+            recent_volumes: BTreeMap::new(),
             cvd_history: BTreeMap::new(),
         }
     }
@@ -120,6 +128,16 @@ impl OrderFlowTracker {
             deltas.remove(0);
         }
 
+        // Track recent volumes per symbol for burst detection
+        let volumes = self
+            .recent_volumes
+            .entry(bar.symbol.clone())
+            .or_insert_with(Vec::new);
+        volumes.push(bar.volume);
+        if volumes.len() > self.volume_baseline_bars {
+            volumes.remove(0);
+        }
+
         // Absorption detection from footprint
         let (absorption_detected, absorption_side) = self.detect_absorption(bar);
 
@@ -134,6 +152,7 @@ impl OrderFlowTracker {
 
         // Get CVD 1-minute change
         let (cvd_1min_change, cvd_rapid_drop, cvd_rapid_rise) = self.get_cvd_1min_change(&bar.symbol, bar.close_time);
+        let (avg_bar_volume, volume_burst_ratio, volume_burst) = self.get_volume_burst_metrics(&bar.symbol, bar.volume);
 
         if absorption_detected {
             info!(
@@ -144,6 +163,7 @@ impl OrderFlowTracker {
                 cvd_1min_change = %cvd_1min_change,
                 cvd_rapid_drop = %cvd_rapid_drop,
                 cvd_rapid_rise = %cvd_rapid_rise,
+                volume_burst_ratio = %volume_burst_ratio,
                 "Absorption detected"
             );
         }
@@ -158,8 +178,31 @@ impl OrderFlowTracker {
             cvd_1min_change,
             cvd_rapid_drop,
             cvd_rapid_rise,
+            avg_bar_volume,
+            volume_burst_ratio,
+            volume_burst,
             timestamp: Utc::now(),
         }
+    }
+
+    fn get_volume_burst_metrics(
+        &self,
+        symbol: &str,
+        current_volume: Decimal,
+    ) -> (Decimal, Decimal, bool) {
+        let volumes = match self.recent_volumes.get(symbol) {
+            Some(v) if v.len() >= 5 => v,
+            _ => return (Decimal::ZERO, Decimal::ZERO, false),
+        };
+
+        let avg = volumes.iter().copied().sum::<Decimal>() / Decimal::from(volumes.len() as u64);
+        if avg <= Decimal::ZERO {
+            return (avg, Decimal::ZERO, false);
+        }
+
+        let ratio = current_volume / avg;
+        let burst = ratio >= self.volume_burst_multiplier;
+        (avg, ratio, burst)
     }
 
     /// Detect absorption from footprint data.
@@ -202,13 +245,13 @@ impl OrderFlowTracker {
 
     /// Check if current bar volume is large relative to recent average
     pub fn is_large_volume(&self, bar: &RangeBar) -> bool {
-        let deltas = match self.recent_deltas.get(&bar.symbol) {
-            Some(d) if d.len() >= 5 => d,
+        let volumes = match self.recent_volumes.get(&bar.symbol) {
+            Some(v) if v.len() >= 5 => v,
             _ => return false,
         };
 
-        let avg_volume: Decimal = deltas.iter().map(|d| d.abs()).sum::<Decimal>()
-            / Decimal::from(deltas.len() as u64);
+        let avg_volume: Decimal = volumes.iter().copied().sum::<Decimal>()
+            / Decimal::from(volumes.len() as u64);
 
         bar.volume > avg_volume * self.large_volume_multiplier
     }

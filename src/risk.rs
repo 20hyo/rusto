@@ -1,5 +1,6 @@
 use crate::config::RiskConfig;
-use crate::types::{Position, Side, TradeSignal};
+use crate::types::{Position, SetupType, Side, TradeSignal};
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use tracing::{info, warn};
@@ -12,6 +13,9 @@ pub struct RiskManager {
     daily_limit: Decimal,
     max_concurrent: usize,
     break_even_ticks: Decimal,
+    break_even_min_hold_secs: i64,
+    break_even_trigger_rr: Decimal,
+    break_even_profit_lock_ticks: Decimal,
     /// Currently open positions per symbol
     open_positions: BTreeMap<String, Vec<String>>, // symbol -> position_ids
     daily_halted: bool,
@@ -31,6 +35,10 @@ impl RiskManager {
             daily_limit,
             max_concurrent: config.max_concurrent_positions,
             break_even_ticks: Decimal::from(config.break_even_ticks),
+            break_even_min_hold_secs: config.break_even_min_hold_secs as i64,
+            break_even_trigger_rr: Decimal::try_from(config.break_even_trigger_rr)
+                .unwrap_or(Decimal::new(12, 1)),
+            break_even_profit_lock_ticks: Decimal::from(config.break_even_profit_lock_ticks),
             open_positions: BTreeMap::new(),
             daily_halted: false,
             leverage,
@@ -167,8 +175,19 @@ impl RiskManager {
         &self,
         position: &Position,
         current_price: Decimal,
+        now: DateTime<Utc>,
     ) -> bool {
         if position.break_even_moved {
+            return false;
+        }
+
+        // For advanced setup, stop is moved after TP1 logic in simulator.
+        if position.setup == SetupType::AdvancedOrderFlow && !position.tp1_filled {
+            return false;
+        }
+
+        let hold_secs = (now - position.entry_time).num_seconds();
+        if hold_secs < self.break_even_min_hold_secs {
             return false;
         }
 
@@ -177,7 +196,23 @@ impl RiskManager {
             Side::Sell => position.entry_price - current_price,
         };
 
-        favorable_move >= self.break_even_ticks
+        if favorable_move < self.break_even_ticks {
+            return false;
+        }
+
+        let initial_risk = (position.entry_price - position.stop_loss).abs();
+        if initial_risk <= Decimal::ZERO {
+            return false;
+        }
+        let rr = favorable_move / initial_risk;
+        rr >= self.break_even_trigger_rr
+    }
+
+    pub fn break_even_stop_price(&self, position: &Position) -> Decimal {
+        match position.side {
+            Side::Buy => position.entry_price + self.break_even_profit_lock_ticks,
+            Side::Sell => position.entry_price - self.break_even_profit_lock_ticks,
+        }
     }
 
     /// Reset daily stats (call at session start)

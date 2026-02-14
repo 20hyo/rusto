@@ -21,6 +21,8 @@ tick_multiplier = 10   # Per-symbol tick = exchange tick_size × multiplier
 absorption_delta_ratio = 3.0
 max_price_delta_ticks = 2
 large_volume_multiplier = 2.0
+volume_baseline_bars = 40
+volume_burst_multiplier = 1.8
 
 [strategy]
 # Available setups: "AAA", "MomentumSqueeze", "AbsorptionReversal", "AdvancedOrderFlow"
@@ -35,6 +37,13 @@ advanced_min_cvd_1min_change = 12.0
 advanced_min_bar_range_pct = 0.05
 advanced_cooldown_bars = 8
 advanced_require_reversal_bar = true
+advanced_min_volume_burst_ratio = 1.8
+advanced_auto_tune_volume_burst = true
+advanced_tuning_lookback_bars = 120
+advanced_tuning_lookahead_bars = 8
+advanced_tuning_stop_pct = 0.20
+advanced_tuning_target_pct = 0.35
+advanced_tuning_min_trades = 8
 
 [risk]
 initial_balance = 10000.0
@@ -42,6 +51,9 @@ max_risk_per_trade = 0.01           # 1% risk per trade
 daily_loss_limit_pct = 0.03         # 3% daily loss limit
 max_concurrent_positions = 5
 break_even_ticks = 3
+break_even_min_hold_secs = 45
+break_even_trigger_rr = 1.2
+break_even_profit_lock_ticks = 1
 default_stop_ticks = 10             # For non-AdvancedOrderFlow strategies
 default_target_multiplier = 2.0
 # AdvancedOrderFlow uses -0.4% hard stop (calculated automatically for 100x leverage)
@@ -51,10 +63,12 @@ slippage_ticks = 1
 maker_fee = 0.0002
 taker_fee = 0.0004
 order_book_depth = 20
-# Leverage settings (100x futures)
-leverage = 100.0
+# Leverage settings (50x futures)
+leverage = 50.0
 margin_type = "Isolated"  # "Isolated" or "Cross"
-maintenance_margin_rate = 0.004  # 0.4% for 100x leverage (Binance standard)
+maintenance_margin_rate = 0.004  # 0.4% (exchange-dependent, verify before live)
+soft_stop_seconds = 45
+soft_stop_drawdown_pct = 0.15
 
 [logging]
 trades_csv_path = "trades.csv"

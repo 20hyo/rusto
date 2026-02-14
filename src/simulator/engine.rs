@@ -338,20 +338,21 @@ impl SimulatorEngine {
             {
                 if self
                     .risk_manager
-                    .should_move_to_break_even(pos, trade.price)
+                    .should_move_to_break_even(pos, trade.price, trade.timestamp)
                 {
-                    let entry_price = pos.entry_price; // Copy before mutable borrow
-                    if self.position_manager.move_stop_to_break_even(&pos_id) {
+                    let new_stop = self.risk_manager.break_even_stop_price(pos);
+                    if self.position_manager.move_stop_to_break_even(&pos_id, new_stop) {
                         info!(
                             position_id = %pos_id,
-                            "Stop moved to break-even"
+                            new_stop = %new_stop,
+                            "Stop moved to protected break-even"
                         );
 
                         // Send execution event
                         if let Some(tx) = &self.execution_tx {
                             let _ = tx.try_send(ExecutionEvent::StopMoved {
                                 position_id: pos_id.clone(),
-                                new_stop: entry_price,
+                                new_stop,
                             });
                         }
                     }
@@ -420,11 +421,19 @@ impl SimulatorEngine {
                                 "TP1 hit: 50% closed at VWAP"
                             );
 
-                            // Mark TP1 as filled and move stop to break-even
-                            if self.position_manager.mark_tp1_filled(&pos_id, entry_price) {
+                            // Mark TP1 as filled and move stop to protected break-even
+                            let be_stop = self
+                                .position_manager
+                                .open_positions()
+                                .into_iter()
+                                .find(|p| p.id == pos_id)
+                                .map(|p| self.risk_manager.break_even_stop_price(p))
+                                .unwrap_or(entry_price);
+                            if self.position_manager.mark_tp1_filled(&pos_id, be_stop) {
                                 info!(
                                     position_id = %pos_id,
-                                    "Stop moved to break-even after TP1"
+                                    new_stop = %be_stop,
+                                    "Stop moved after TP1"
                                 );
 
                                 // Send TP1 execution event
@@ -471,12 +480,23 @@ impl SimulatorEngine {
                 }
             }
 
-            // Soft Stop: If 10 seconds passed and price hasn't moved in our favor, exit
+            // Soft Stop: after timeout, cut only if trade is still in meaningful drawdown.
             let elapsed_secs = (current_time - entry_time).num_seconds();
-            if elapsed_secs >= 10 && !tp1_filled {
+            let soft_stop_secs = self.config.soft_stop_seconds as i64;
+            let soft_stop_drawdown = Decimal::try_from(self.config.soft_stop_drawdown_pct)
+                .unwrap_or(Decimal::new(15, 2));
+            if elapsed_secs >= soft_stop_secs && !tp1_filled {
+                let drawdown_level = match side {
+                    crate::types::Side::Buy => {
+                        entry_price * (Decimal::ONE - (soft_stop_drawdown / Decimal::from(100)))
+                    }
+                    crate::types::Side::Sell => {
+                        entry_price * (Decimal::ONE + (soft_stop_drawdown / Decimal::from(100)))
+                    }
+                };
                 let no_progress = match side {
-                    crate::types::Side::Buy => current_price <= entry_price,
-                    crate::types::Side::Sell => current_price >= entry_price,
+                    crate::types::Side::Buy => current_price <= drawdown_level,
+                    crate::types::Side::Sell => current_price >= drawdown_level,
                 };
 
                 if no_progress {
@@ -488,8 +508,9 @@ impl SimulatorEngine {
                         warn!(
                             position_id = %pos_id,
                             elapsed_secs = %elapsed_secs,
+                            drawdown_level = %drawdown_level,
                             pnl = %pos.pnl,
-                            "Soft Stop triggered: No progress after 10s"
+                            "Soft Stop triggered: drawdown after timeout"
                         );
 
                         // Send execution event
