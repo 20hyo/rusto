@@ -1,6 +1,6 @@
 use crate::config::RiskConfig;
 use crate::types::{Position, SetupType, Side, TradeSignal};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use tracing::{info, warn};
@@ -16,8 +16,15 @@ pub struct RiskManager {
     break_even_min_hold_secs: i64,
     break_even_trigger_rr: Decimal,
     break_even_profit_lock_ticks: Decimal,
+    confidence_sizing_enabled: bool,
+    min_confidence_scale: Decimal,
+    max_confidence_scale: Decimal,
+    consecutive_loss_limit: u32,
+    symbol_cooldown: Duration,
     /// Currently open positions per symbol
     open_positions: BTreeMap<String, Vec<String>>, // symbol -> position_ids
+    symbol_loss_streak: BTreeMap<String, u32>,
+    symbol_cooldown_until: BTreeMap<String, DateTime<Utc>>,
     daily_halted: bool,
     leverage: Decimal,
 }
@@ -39,7 +46,17 @@ impl RiskManager {
             break_even_trigger_rr: Decimal::try_from(config.break_even_trigger_rr)
                 .unwrap_or(Decimal::new(12, 1)),
             break_even_profit_lock_ticks: Decimal::from(config.break_even_profit_lock_ticks),
+            confidence_sizing_enabled: config.confidence_sizing_enabled,
+            min_confidence_scale: Decimal::try_from(config.min_confidence_scale)
+                .unwrap_or(Decimal::new(6, 1)),
+            max_confidence_scale: Decimal::try_from(config.max_confidence_scale)
+                .unwrap_or(Decimal::new(12, 1)),
+            consecutive_loss_limit: config.consecutive_loss_limit.max(1),
+            symbol_cooldown: Duration::try_minutes(config.symbol_cooldown_minutes as i64)
+                .unwrap_or_else(|| Duration::minutes(30)),
             open_positions: BTreeMap::new(),
+            symbol_loss_streak: BTreeMap::new(),
+            symbol_cooldown_until: BTreeMap::new(),
             daily_halted: false,
             leverage,
         }
@@ -50,6 +67,18 @@ impl RiskManager {
         if self.daily_halted {
             warn!("Trading halted: daily loss limit reached");
             return false;
+        }
+
+        let now = Utc::now();
+        if let Some(until) = self.symbol_cooldown_until.get(&signal.symbol) {
+            if *until > now {
+                warn!(
+                    symbol = %signal.symbol,
+                    cooldown_until = %until,
+                    "Symbol in cooldown due to consecutive losses"
+                );
+                return false;
+            }
         }
 
         // Max concurrent positions
@@ -65,10 +94,7 @@ impl RiskManager {
         // Max one position per symbol
         if let Some(positions) = self.open_positions.get(&signal.symbol) {
             if !positions.is_empty() {
-                warn!(
-                    "Already have position for symbol: {}",
-                    signal.symbol
-                );
+                warn!("Already have position for symbol: {}", signal.symbol);
                 return false;
             }
         }
@@ -93,7 +119,14 @@ impl RiskManager {
                 .unwrap_or_else(|_| Decimal::new(1, 2));
 
         // Calculate quantity based on risk per trade
-        let quantity = risk_amount / stop_distance;
+        let mut quantity = risk_amount / stop_distance;
+        if self.confidence_sizing_enabled {
+            let confidence = signal.confidence.max(Decimal::ZERO);
+            let scale = confidence
+                .max(self.min_confidence_scale)
+                .min(self.max_confidence_scale);
+            quantity *= scale;
+        }
 
         // Calculate required margin for this position
         let required_margin = (signal.entry_price * quantity) / self.leverage;
@@ -149,6 +182,28 @@ impl RiskManager {
 
         self.daily_pnl += position.pnl;
         self.balance += position.pnl;
+
+        if position.pnl < Decimal::ZERO {
+            let streak = self
+                .symbol_loss_streak
+                .entry(position.symbol.clone())
+                .or_insert(0);
+            *streak += 1;
+            if *streak >= self.consecutive_loss_limit {
+                let until = Utc::now() + self.symbol_cooldown;
+                self.symbol_cooldown_until
+                    .insert(position.symbol.clone(), until);
+                warn!(
+                    symbol = %position.symbol,
+                    streak = *streak,
+                    cooldown_until = %until,
+                    "Consecutive-loss cooldown activated"
+                );
+                *streak = 0;
+            }
+        } else {
+            self.symbol_loss_streak.insert(position.symbol.clone(), 0);
+        }
 
         info!(
             position_id = %position.id,

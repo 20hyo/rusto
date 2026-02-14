@@ -3,6 +3,7 @@ use crate::types::{
     EntryFeatures, OrderFlowMetrics, RangeBar, SetupType, Side, TradeSignal, VolumeProfileSnapshot,
 };
 use rusqlite::{params, Connection};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use tracing::{info, warn};
@@ -12,6 +13,23 @@ struct AdvancedSample {
     bar: RangeBar,
     flow: OrderFlowMetrics,
     profile: VolumeProfileSnapshot,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MarketRegime {
+    TrendHighVol,
+    TrendLowVol,
+    ChopHighVol,
+    ChopLowVol,
+}
+
+#[derive(Clone, Copy)]
+struct AdvancedDynamicParams {
+    cooldown_bars: usize,
+    min_imbalance: Decimal,
+    min_abs_cvd_change: Decimal,
+    min_bar_range_pct: Decimal,
+    min_volume_burst_ratio: Decimal,
 }
 
 /// Generates trading signals based on order flow + volume profile analysis
@@ -345,22 +363,16 @@ impl StrategyEngine {
     fn check_advanced_orderflow(&mut self, bar: &RangeBar) -> Option<TradeSignal> {
         let profile = self.profiles.get(&bar.symbol)?;
         let flow = self.latest_flow.get(&bar.symbol)?;
+        let (dynamic, regime) = self.dynamic_advanced_params(&bar.symbol);
 
         // Cooldown to avoid rapid-fire signals in noisy conditions.
         if let Some(last_bar) = self.last_advanced_signal_bar.get(&bar.symbol) {
-            if bar.bar_index.saturating_sub(*last_bar) < self.config.advanced_cooldown_bars as u64 {
+            if bar.bar_index.saturating_sub(*last_bar) < dynamic.cooldown_bars as u64 {
                 return None;
             }
         }
 
         let zone_threshold = Decimal::from(self.config.advanced_zone_ticks);
-        let min_imbalance = Decimal::try_from(self.config.advanced_min_imbalance_ratio)
-            .unwrap_or(Decimal::new(18, 1));
-        let min_abs_cvd_change = Decimal::try_from(self.config.advanced_min_cvd_1min_change)
-            .unwrap_or(Decimal::new(5, 0));
-        let min_bar_range_pct =
-            Decimal::try_from(self.config.advanced_min_bar_range_pct).unwrap_or(Decimal::new(3, 2));
-        let min_volume_burst_ratio = self.min_volume_burst_ratio_for(&bar.symbol);
 
         let bar_range = (bar.high - bar.low).abs();
         let bar_range_pct = if bar.close > Decimal::ZERO {
@@ -368,18 +380,24 @@ impl StrategyEngine {
         } else {
             Decimal::ZERO
         };
-        if bar_range_pct < min_bar_range_pct {
+        if bar_range_pct < dynamic.min_bar_range_pct {
             return None;
         }
 
-        if flow.cvd_1min_change.abs() < min_abs_cvd_change {
+        if flow.cvd_1min_change.abs() < dynamic.min_abs_cvd_change {
             return None;
         }
-        if !flow.volume_burst || flow.volume_burst_ratio < min_volume_burst_ratio {
+        if !flow.volume_burst || flow.volume_burst_ratio < dynamic.min_volume_burst_ratio {
             return None;
         }
 
-        match self.advanced_side_without_burst(bar, flow, profile, zone_threshold, min_imbalance)? {
+        match self.advanced_side_without_burst(
+            bar,
+            flow,
+            profile,
+            zone_threshold,
+            dynamic.min_imbalance,
+        )? {
             Side::Buy => {
                 let near_val = (bar.close - profile.val).abs() <= zone_threshold;
                 let near_hvn = profile
@@ -410,7 +428,8 @@ impl StrategyEngine {
                     tp2_vah = %tp2,
                     cvd_change = %flow.cvd_1min_change,
                     volume_burst_ratio = %flow.volume_burst_ratio,
-                    required_burst_ratio = %min_volume_burst_ratio,
+                    required_burst_ratio = %dynamic.min_volume_burst_ratio,
+                    regime = ?regime,
                     near_zone = if near_val { "VAL" } else { "HVN" },
                     "🎯 Long: 매도 압축 포착!"
                 );
@@ -461,7 +480,8 @@ impl StrategyEngine {
                     tp2_val = %tp2,
                     cvd_change = %flow.cvd_1min_change,
                     volume_burst_ratio = %flow.volume_burst_ratio,
-                    required_burst_ratio = %min_volume_burst_ratio,
+                    required_burst_ratio = %dynamic.min_volume_burst_ratio,
+                    regime = ?regime,
                     near_zone = if near_vah { "VAH" } else { "HVN" },
                     "🎯 Short: 매수 압축 포착!"
                 );
@@ -511,6 +531,112 @@ impl StrategyEngine {
                 Decimal::try_from(self.config.advanced_min_volume_burst_ratio)
                     .unwrap_or(Decimal::new(18, 1))
             })
+    }
+
+    fn dynamic_advanced_params(&self, symbol: &str) -> (AdvancedDynamicParams, MarketRegime) {
+        let base_imbalance = Decimal::try_from(self.config.advanced_min_imbalance_ratio)
+            .unwrap_or(Decimal::new(18, 1));
+        let base_cvd = Decimal::try_from(self.config.advanced_min_cvd_1min_change)
+            .unwrap_or(Decimal::new(5, 0));
+        let base_bar_range =
+            Decimal::try_from(self.config.advanced_min_bar_range_pct).unwrap_or(Decimal::new(3, 2));
+        let base_burst = self.min_volume_burst_ratio_for(symbol);
+        let base_cooldown = self.config.advanced_cooldown_bars.max(1);
+
+        let regime = self.detect_regime(symbol);
+        if !self.config.regime_switching_enabled {
+            return (
+                AdvancedDynamicParams {
+                    cooldown_bars: base_cooldown,
+                    min_imbalance: base_imbalance,
+                    min_abs_cvd_change: base_cvd,
+                    min_bar_range_pct: base_bar_range,
+                    min_volume_burst_ratio: base_burst,
+                },
+                regime,
+            );
+        }
+
+        let aggressive_mult = Decimal::try_from(self.config.regime_aggressive_multiplier)
+            .unwrap_or(Decimal::new(9, 1));
+        let conservative_mult = Decimal::try_from(self.config.regime_conservative_multiplier)
+            .unwrap_or(Decimal::new(115, 2));
+        let aggr_cooldown_mult = Decimal::try_from(self.config.regime_aggressive_cooldown_mult)
+            .unwrap_or(Decimal::new(75, 2));
+        let cons_cooldown_mult = Decimal::try_from(self.config.regime_conservative_cooldown_mult)
+            .unwrap_or(Decimal::new(14, 1));
+
+        let (param_mult, cooldown_mult) = match regime {
+            MarketRegime::TrendHighVol => (aggressive_mult, aggr_cooldown_mult),
+            MarketRegime::TrendLowVol => (Decimal::ONE, Decimal::ONE),
+            MarketRegime::ChopHighVol => (conservative_mult, cons_cooldown_mult),
+            MarketRegime::ChopLowVol => (conservative_mult, cons_cooldown_mult),
+        };
+
+        let cooldown_bars = ((Decimal::from(base_cooldown as u64) * cooldown_mult)
+            .round()
+            .to_u64()
+            .unwrap_or(base_cooldown as u64)
+            .max(1)) as usize;
+
+        (
+            AdvancedDynamicParams {
+                cooldown_bars,
+                min_imbalance: base_imbalance * param_mult,
+                min_abs_cvd_change: base_cvd * param_mult,
+                min_bar_range_pct: base_bar_range * param_mult,
+                min_volume_burst_ratio: base_burst * param_mult,
+            },
+            regime,
+        )
+    }
+
+    fn detect_regime(&self, symbol: &str) -> MarketRegime {
+        let Some(bars) = self.recent_bars.get(symbol) else {
+            return MarketRegime::ChopLowVol;
+        };
+        let window = self.config.regime_window_bars.max(10);
+        if bars.len() < window {
+            return MarketRegime::ChopLowVol;
+        }
+        let slice = &bars[bars.len() - window..];
+        let first = &slice[0];
+        let last = &slice[slice.len() - 1];
+
+        let avg_range_pct = {
+            let sum: Decimal = slice
+                .iter()
+                .map(|b| {
+                    if b.close > Decimal::ZERO {
+                        ((b.high - b.low).abs() / b.close) * Decimal::from(100)
+                    } else {
+                        Decimal::ZERO
+                    }
+                })
+                .sum();
+            sum / Decimal::from(slice.len() as u64)
+        };
+
+        let trend_pct = if first.open > Decimal::ZERO {
+            ((last.close - first.open).abs() / first.open) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+
+        let trend_threshold = Decimal::try_from(self.config.regime_trend_threshold_pct)
+            .unwrap_or(Decimal::new(25, 2));
+        let high_vol_threshold = Decimal::try_from(self.config.regime_high_vol_threshold_pct)
+            .unwrap_or(Decimal::new(12, 2));
+
+        let trending = trend_pct >= trend_threshold;
+        let high_vol = avg_range_pct >= high_vol_threshold;
+
+        match (trending, high_vol) {
+            (true, true) => MarketRegime::TrendHighVol,
+            (true, false) => MarketRegime::TrendLowVol,
+            (false, true) => MarketRegime::ChopHighVol,
+            (false, false) => MarketRegime::ChopLowVol,
+        }
     }
 
     fn advanced_side_without_burst(

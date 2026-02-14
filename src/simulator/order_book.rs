@@ -87,6 +87,16 @@ impl LocalOrderBook {
         self.asks.values().sum()
     }
 
+    /// Sum of top-N bid depth quantities (best bid levels first).
+    pub fn top_bid_depth(&self, levels: usize) -> Decimal {
+        self.bids.iter().rev().take(levels).map(|(_, q)| *q).sum()
+    }
+
+    /// Sum of top-N ask depth quantities (best ask levels first).
+    pub fn top_ask_depth(&self, levels: usize) -> Decimal {
+        self.asks.iter().take(levels).map(|(_, q)| *q).sum()
+    }
+
     /// Calculate bid/ask depth ratio
     /// Returns (bid_volume, ask_volume, ratio)
     /// ratio > 1.0 means more bids (buying pressure)

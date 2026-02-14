@@ -133,6 +133,22 @@ pub struct StrategyConfig {
     pub advanced_tuning_target_pct: f64,
     #[serde(default = "default_advanced_tuning_min_trades")]
     pub advanced_tuning_min_trades: usize,
+    #[serde(default = "default_regime_switching_enabled")]
+    pub regime_switching_enabled: bool,
+    #[serde(default = "default_regime_window_bars")]
+    pub regime_window_bars: usize,
+    #[serde(default = "default_regime_trend_threshold_pct")]
+    pub regime_trend_threshold_pct: f64,
+    #[serde(default = "default_regime_high_vol_threshold_pct")]
+    pub regime_high_vol_threshold_pct: f64,
+    #[serde(default = "default_regime_aggressive_multiplier")]
+    pub regime_aggressive_multiplier: f64,
+    #[serde(default = "default_regime_conservative_multiplier")]
+    pub regime_conservative_multiplier: f64,
+    #[serde(default = "default_regime_aggressive_cooldown_mult")]
+    pub regime_aggressive_cooldown_mult: f64,
+    #[serde(default = "default_regime_conservative_cooldown_mult")]
+    pub regime_conservative_cooldown_mult: f64,
 }
 
 fn default_advanced_zone_ticks() -> u32 {
@@ -187,6 +203,38 @@ fn default_advanced_tuning_min_trades() -> usize {
     8
 }
 
+fn default_regime_switching_enabled() -> bool {
+    true
+}
+
+fn default_regime_window_bars() -> usize {
+    40
+}
+
+fn default_regime_trend_threshold_pct() -> f64 {
+    0.25
+}
+
+fn default_regime_high_vol_threshold_pct() -> f64 {
+    0.12
+}
+
+fn default_regime_aggressive_multiplier() -> f64 {
+    0.9
+}
+
+fn default_regime_conservative_multiplier() -> f64 {
+    1.15
+}
+
+fn default_regime_aggressive_cooldown_mult() -> f64 {
+    0.75
+}
+
+fn default_regime_conservative_cooldown_mult() -> f64 {
+    1.4
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct RiskConfig {
     pub initial_balance: f64,
@@ -200,6 +248,16 @@ pub struct RiskConfig {
     pub break_even_trigger_rr: f64,
     #[serde(default = "default_break_even_profit_lock_ticks")]
     pub break_even_profit_lock_ticks: u32,
+    #[serde(default = "default_confidence_sizing_enabled")]
+    pub confidence_sizing_enabled: bool,
+    #[serde(default = "default_min_confidence_scale")]
+    pub min_confidence_scale: f64,
+    #[serde(default = "default_max_confidence_scale")]
+    pub max_confidence_scale: f64,
+    #[serde(default = "default_consecutive_loss_limit")]
+    pub consecutive_loss_limit: u32,
+    #[serde(default = "default_symbol_cooldown_minutes")]
+    pub symbol_cooldown_minutes: u64,
     pub default_stop_ticks: u32,
     pub default_target_multiplier: f64,
 }
@@ -216,6 +274,26 @@ fn default_break_even_profit_lock_ticks() -> u32 {
     1
 }
 
+fn default_confidence_sizing_enabled() -> bool {
+    true
+}
+
+fn default_min_confidence_scale() -> f64 {
+    0.6
+}
+
+fn default_max_confidence_scale() -> f64 {
+    1.2
+}
+
+fn default_consecutive_loss_limit() -> u32 {
+    3
+}
+
+fn default_symbol_cooldown_minutes() -> u64 {
+    30
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct SimulatorConfig {
     pub slippage_ticks: u32,
@@ -229,6 +307,28 @@ pub struct SimulatorConfig {
     pub soft_stop_seconds: u64,
     #[serde(default = "default_soft_stop_drawdown_pct")]
     pub soft_stop_drawdown_pct: f64,
+    #[serde(default = "default_require_orderbook_for_entry")]
+    pub require_orderbook_for_entry: bool,
+    #[serde(default = "default_max_spread_bps")]
+    pub max_spread_bps: f64,
+    #[serde(default = "default_min_depth_imbalance_ratio")]
+    pub min_depth_imbalance_ratio: f64,
+    #[serde(default = "default_expectancy_filter_enabled")]
+    pub expectancy_filter_enabled: bool,
+    #[serde(default = "default_expectancy_min_trades_per_hour")]
+    pub expectancy_min_trades_per_hour: usize,
+    #[serde(default = "default_expectancy_min_avg_pnl")]
+    pub expectancy_min_avg_pnl: f64,
+    #[serde(default = "default_expectancy_lookback_trades")]
+    pub expectancy_lookback_trades: usize,
+    #[serde(default = "default_slippage_model_enabled")]
+    pub slippage_model_enabled: bool,
+    #[serde(default = "default_max_model_slippage_bps")]
+    pub max_model_slippage_bps: f64,
+    #[serde(default = "default_impact_depth_levels")]
+    pub impact_depth_levels: usize,
+    #[serde(default = "default_impact_weight_bps")]
+    pub impact_weight_bps: f64,
 }
 
 fn default_soft_stop_seconds() -> u64 {
@@ -237,6 +337,50 @@ fn default_soft_stop_seconds() -> u64 {
 
 fn default_soft_stop_drawdown_pct() -> f64 {
     0.15
+}
+
+fn default_require_orderbook_for_entry() -> bool {
+    true
+}
+
+fn default_max_spread_bps() -> f64 {
+    4.0
+}
+
+fn default_min_depth_imbalance_ratio() -> f64 {
+    1.05
+}
+
+fn default_expectancy_filter_enabled() -> bool {
+    true
+}
+
+fn default_expectancy_min_trades_per_hour() -> usize {
+    12
+}
+
+fn default_expectancy_min_avg_pnl() -> f64 {
+    0.0
+}
+
+fn default_expectancy_lookback_trades() -> usize {
+    80
+}
+
+fn default_slippage_model_enabled() -> bool {
+    true
+}
+
+fn default_max_model_slippage_bps() -> f64 {
+    6.0
+}
+
+fn default_impact_depth_levels() -> usize {
+    5
+}
+
+fn default_impact_weight_bps() -> f64 {
+    8.0
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -276,7 +420,9 @@ impl AppConfig {
 
     fn validate(&self) -> Result<(), String> {
         if !self.general.auto_select_symbols && self.general.symbols.is_empty() {
-            return Err("At least one symbol must be configured (or enable auto_select_symbols)".into());
+            return Err(
+                "At least one symbol must be configured (or enable auto_select_symbols)".into(),
+            );
         }
         if self.risk.max_risk_per_trade <= 0.0 || self.risk.max_risk_per_trade > 0.1 {
             return Err("max_risk_per_trade must be between 0 and 0.1".into());
@@ -286,6 +432,33 @@ impl AppConfig {
         }
         if self.volume_profile.value_area_pct <= 0.0 || self.volume_profile.value_area_pct > 1.0 {
             return Err("value_area_pct must be between 0 and 1".into());
+        }
+        if self.risk.min_confidence_scale <= 0.0
+            || self.risk.max_confidence_scale <= 0.0
+            || self.risk.min_confidence_scale > self.risk.max_confidence_scale
+        {
+            return Err("confidence scale range is invalid".into());
+        }
+        if self.simulator.max_spread_bps <= 0.0 {
+            return Err("max_spread_bps must be > 0".into());
+        }
+        if self.simulator.min_depth_imbalance_ratio <= 0.0 {
+            return Err("min_depth_imbalance_ratio must be > 0".into());
+        }
+        if self.strategy.regime_window_bars < 10 {
+            return Err("regime_window_bars must be >= 10".into());
+        }
+        if self.simulator.expectancy_min_trades_per_hour == 0 {
+            return Err("expectancy_min_trades_per_hour must be > 0".into());
+        }
+        if self.simulator.expectancy_lookback_trades == 0 {
+            return Err("expectancy_lookback_trades must be > 0".into());
+        }
+        if self.simulator.max_model_slippage_bps <= 0.0 {
+            return Err("max_model_slippage_bps must be > 0".into());
+        }
+        if self.simulator.impact_depth_levels == 0 {
+            return Err("impact_depth_levels must be > 0".into());
         }
         Ok(())
     }

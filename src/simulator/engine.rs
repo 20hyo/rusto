@@ -15,6 +15,12 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::types::VolumeProfileSnapshot;
+use chrono::Timelike;
+
+#[derive(Default, Clone)]
+struct HourlyPerformance {
+    pnls: Vec<Decimal>,
+}
 
 /// Paper trading execution engine with leverage support
 pub struct SimulatorEngine {
@@ -30,6 +36,18 @@ pub struct SimulatorEngine {
     maintenance_margin_rate: Decimal,
     exchange_info: Option<Arc<ExchangeInfoManager>>,
     latest_profiles: BTreeMap<String, VolumeProfileSnapshot>,
+    require_orderbook_for_entry: bool,
+    max_spread_bps: Decimal,
+    min_depth_imbalance_ratio: Decimal,
+    expectancy_filter_enabled: bool,
+    expectancy_min_trades_per_hour: usize,
+    expectancy_min_avg_pnl: Decimal,
+    expectancy_lookback_trades: usize,
+    slippage_model_enabled: bool,
+    max_model_slippage_bps: Decimal,
+    impact_depth_levels: usize,
+    impact_weight_bps: Decimal,
+    hourly_performance: BTreeMap<(String, u32), HourlyPerformance>,
     /// Per-symbol trading statistics
     symbol_stats: BTreeMap<String, SymbolStats>,
     /// Shared state read by the hourly reporter task
@@ -46,6 +64,21 @@ impl SimulatorEngine {
         let leverage = Decimal::try_from(config.leverage).unwrap_or(Decimal::from(100));
         let maintenance_margin_rate = Decimal::try_from(config.maintenance_margin_rate)
             .unwrap_or_else(|_| Decimal::new(4, 3)); // 0.004
+        let max_spread_bps = Decimal::try_from(config.max_spread_bps).unwrap_or(Decimal::new(4, 0));
+        let min_depth_imbalance_ratio =
+            Decimal::try_from(config.min_depth_imbalance_ratio).unwrap_or(Decimal::new(105, 2));
+        let require_orderbook_for_entry = config.require_orderbook_for_entry;
+        let expectancy_filter_enabled = config.expectancy_filter_enabled;
+        let expectancy_min_trades_per_hour = config.expectancy_min_trades_per_hour;
+        let expectancy_min_avg_pnl =
+            Decimal::try_from(config.expectancy_min_avg_pnl).unwrap_or(Decimal::ZERO);
+        let expectancy_lookback_trades = config.expectancy_lookback_trades;
+        let slippage_model_enabled = config.slippage_model_enabled;
+        let max_model_slippage_bps =
+            Decimal::try_from(config.max_model_slippage_bps).unwrap_or(Decimal::new(6, 0));
+        let impact_depth_levels = config.impact_depth_levels;
+        let impact_weight_bps =
+            Decimal::try_from(config.impact_weight_bps).unwrap_or(Decimal::new(8, 0));
         let margin_type = match config.margin_type.to_lowercase().as_str() {
             "cross" => MarginType::Cross,
             _ => MarginType::Isolated,
@@ -64,6 +97,18 @@ impl SimulatorEngine {
             maintenance_margin_rate,
             exchange_info: None,
             latest_profiles: BTreeMap::new(),
+            require_orderbook_for_entry,
+            max_spread_bps,
+            min_depth_imbalance_ratio,
+            expectancy_filter_enabled,
+            expectancy_min_trades_per_hour,
+            expectancy_min_avg_pnl,
+            expectancy_lookback_trades,
+            slippage_model_enabled,
+            max_model_slippage_bps,
+            impact_depth_levels,
+            impact_weight_bps,
+            hourly_performance: BTreeMap::new(),
             symbol_stats: BTreeMap::new(),
             bot_stats: None,
         }
@@ -160,6 +205,13 @@ impl SimulatorEngine {
     }
 
     fn execute_signal(&mut self, signal: TradeSignal) {
+        if !self.passes_execution_quality_filters(&signal) {
+            return;
+        }
+        if !self.passes_expectancy_filter(&signal) {
+            return;
+        }
+
         if !self.risk_manager.can_trade(&signal) {
             warn!(
                 symbol = %signal.symbol,
@@ -219,6 +271,14 @@ impl SimulatorEngine {
         // Create modified signal with validated values
         let mut validated_signal = signal.clone();
         validated_signal.entry_price = validated_entry;
+        if !self.passes_slippage_model(
+            &validated_signal.symbol,
+            validated_signal.side,
+            validated_entry,
+            validated_quantity,
+        ) {
+            return;
+        }
 
         let mut position = self.position_manager.open_position(
             &validated_signal,
@@ -268,6 +328,165 @@ impl SimulatorEngine {
         }
     }
 
+    fn passes_execution_quality_filters(&self, signal: &TradeSignal) -> bool {
+        let book = match self.order_books.get(&signal.symbol) {
+            Some(b) => b,
+            None if self.require_orderbook_for_entry => {
+                warn!(
+                    symbol = %signal.symbol,
+                    "Signal rejected: no order book snapshot available"
+                );
+                return false;
+            }
+            None => return true,
+        };
+
+        let Some(spread) = book.spread() else {
+            if self.require_orderbook_for_entry {
+                warn!(symbol = %signal.symbol, "Signal rejected: missing spread data");
+                return false;
+            }
+            return true;
+        };
+        let Some(mid) = book.mid_price() else {
+            if self.require_orderbook_for_entry {
+                warn!(symbol = %signal.symbol, "Signal rejected: missing mid price");
+                return false;
+            }
+            return true;
+        };
+        if mid <= Decimal::ZERO {
+            return false;
+        }
+
+        let spread_bps = (spread / mid) * Decimal::from(10_000);
+        if spread_bps > self.max_spread_bps {
+            warn!(
+                symbol = %signal.symbol,
+                spread_bps = %spread_bps,
+                max_spread_bps = %self.max_spread_bps,
+                "Signal rejected: spread too wide"
+            );
+            return false;
+        }
+
+        let (bid_vol, ask_vol, ratio) = book.depth_imbalance();
+        let side_ok = match signal.side {
+            crate::types::Side::Buy => ratio >= self.min_depth_imbalance_ratio,
+            crate::types::Side::Sell => {
+                if bid_vol <= Decimal::ZERO {
+                    false
+                } else {
+                    (ask_vol / bid_vol) >= self.min_depth_imbalance_ratio
+                }
+            }
+        };
+        if !side_ok {
+            warn!(
+                symbol = %signal.symbol,
+                side = ?signal.side,
+                bid_vol = %bid_vol,
+                ask_vol = %ask_vol,
+                ratio = %ratio,
+                min_depth_imbalance_ratio = %self.min_depth_imbalance_ratio,
+                "Signal rejected: insufficient depth imbalance"
+            );
+            return false;
+        }
+
+        true
+    }
+
+    fn passes_expectancy_filter(&self, signal: &TradeSignal) -> bool {
+        if !self.expectancy_filter_enabled {
+            return true;
+        }
+
+        let hour = signal.timestamp.hour();
+        let key = (signal.symbol.clone(), hour);
+        let Some(stats) = self.hourly_performance.get(&key) else {
+            return true;
+        };
+        if stats.pnls.len() < self.expectancy_min_trades_per_hour {
+            return true;
+        }
+
+        let avg =
+            stats.pnls.iter().copied().sum::<Decimal>() / Decimal::from(stats.pnls.len() as u64);
+        if avg < self.expectancy_min_avg_pnl {
+            warn!(
+                symbol = %signal.symbol,
+                utc_hour = hour,
+                avg_pnl = %avg,
+                min_avg_pnl = %self.expectancy_min_avg_pnl,
+                samples = stats.pnls.len(),
+                "Signal rejected: UTC-hour expectancy below threshold"
+            );
+            return false;
+        }
+        true
+    }
+
+    fn passes_slippage_model(
+        &self,
+        symbol: &str,
+        side: crate::types::Side,
+        entry_price: Decimal,
+        quantity: Decimal,
+    ) -> bool {
+        if !self.slippage_model_enabled {
+            return true;
+        }
+        let Some(book) = self.order_books.get(symbol) else {
+            return true;
+        };
+        if entry_price <= Decimal::ZERO || quantity <= Decimal::ZERO {
+            return false;
+        }
+
+        let mid = match book.mid_price() {
+            Some(v) if v > Decimal::ZERO => v,
+            _ => return true,
+        };
+        let spread = book.spread().unwrap_or(Decimal::ZERO);
+        let half_spread_bps = (spread / mid) * Decimal::from(5_000);
+        let top_depth = match side {
+            crate::types::Side::Buy => book.top_ask_depth(self.impact_depth_levels),
+            crate::types::Side::Sell => book.top_bid_depth(self.impact_depth_levels),
+        };
+        if top_depth <= Decimal::ZERO {
+            return true;
+        }
+        let impact_ratio = quantity / top_depth;
+        let impact_bps = impact_ratio * self.impact_weight_bps;
+        let total_slippage_bps = half_spread_bps + impact_bps;
+
+        if total_slippage_bps > self.max_model_slippage_bps {
+            warn!(
+                symbol = %symbol,
+                side = ?side,
+                quantity = %quantity,
+                top_depth = %top_depth,
+                estimated_slippage_bps = %total_slippage_bps,
+                max_model_slippage_bps = %self.max_model_slippage_bps,
+                "Signal rejected: estimated slippage too high"
+            );
+            return false;
+        }
+        true
+    }
+
+    fn record_hourly_expectancy(&mut self, position: &crate::types::Position) {
+        let hour = position.entry_time.hour();
+        let key = (position.symbol.clone(), hour);
+        let stats = self.hourly_performance.entry(key).or_default();
+        stats.pnls.push(position.pnl);
+        if stats.pnls.len() > self.expectancy_lookback_trades {
+            let keep = self.expectancy_lookback_trades;
+            stats.pnls.drain(..stats.pnls.len() - keep);
+        }
+    }
+
     fn on_trade(&mut self, trade: &NormalizedTrade) {
         // Keep shared stats up to date for the hourly reporter task
         self.sync_bot_stats();
@@ -280,6 +499,7 @@ impl SimulatorEngine {
         for position in &liquidated {
             self.risk_manager.close_position(position);
             self.trade_logger.log_trade(position);
+            self.record_hourly_expectancy(position);
             self.symbol_stats
                 .entry(position.symbol.clone())
                 .or_default()
@@ -311,6 +531,7 @@ impl SimulatorEngine {
         for position in &closed {
             self.risk_manager.close_position(position);
             self.trade_logger.log_trade(position);
+            self.record_hourly_expectancy(position);
             self.symbol_stats
                 .entry(position.symbol.clone())
                 .or_default()
@@ -507,6 +728,7 @@ impl SimulatorEngine {
                         ) {
                             self.risk_manager.close_position(&pos);
                             self.trade_logger.log_trade(&pos);
+                            self.record_hourly_expectancy(&pos);
                             self.symbol_stats
                                 .entry(pos.symbol.clone())
                                 .or_default()
@@ -556,6 +778,7 @@ impl SimulatorEngine {
                     ) {
                         self.risk_manager.close_position(&pos);
                         self.trade_logger.log_trade(&pos);
+                        self.record_hourly_expectancy(&pos);
                         self.symbol_stats
                             .entry(pos.symbol.clone())
                             .or_default()

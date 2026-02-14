@@ -44,6 +44,14 @@ advanced_tuning_lookahead_bars = 8
 advanced_tuning_stop_pct = 0.20
 advanced_tuning_target_pct = 0.35
 advanced_tuning_min_trades = 8
+regime_switching_enabled = true
+regime_window_bars = 40
+regime_trend_threshold_pct = 0.25
+regime_high_vol_threshold_pct = 0.12
+regime_aggressive_multiplier = 0.9
+regime_conservative_multiplier = 1.15
+regime_aggressive_cooldown_mult = 0.75
+regime_conservative_cooldown_mult = 1.4
 
 [risk]
 initial_balance = 10000.0
@@ -54,6 +62,11 @@ break_even_ticks = 3
 break_even_min_hold_secs = 45
 break_even_trigger_rr = 1.2
 break_even_profit_lock_ticks = 1
+confidence_sizing_enabled = true
+min_confidence_scale = 0.6
+max_confidence_scale = 1.2
+consecutive_loss_limit = 3
+symbol_cooldown_minutes = 30
 default_stop_ticks = 10             # For non-AdvancedOrderFlow strategies
 default_target_multiplier = 2.0
 # AdvancedOrderFlow uses -0.4% hard stop (calculated automatically for 100x leverage)
@@ -69,6 +82,17 @@ margin_type = "Isolated"  # "Isolated" or "Cross"
 maintenance_margin_rate = 0.004  # 0.4% (exchange-dependent, verify before live)
 soft_stop_seconds = 45
 soft_stop_drawdown_pct = 0.15
+require_orderbook_for_entry = true
+max_spread_bps = 4.0
+min_depth_imbalance_ratio = 1.05
+expectancy_filter_enabled = true
+expectancy_min_trades_per_hour = 12
+expectancy_min_avg_pnl = 0.0
+expectancy_lookback_trades = 80
+slippage_model_enabled = true
+max_model_slippage_bps = 6.0
+impact_depth_levels = 5
+impact_weight_bps = 8.0
 
 [logging]
 trades_csv_path = "trades.csv"
