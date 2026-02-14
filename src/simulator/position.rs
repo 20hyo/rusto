@@ -1,5 +1,5 @@
-use crate::types::{MarginType, Position, PositionStatus, Side, TradeSignal};
-use chrono::Utc;
+use crate::types::{ExitReason, MarginType, Position, PositionStatus, Side, TradeSignal};
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
@@ -82,17 +82,10 @@ impl PositionManager {
             taker_fee,
         );
 
-        let initial_margin = calculate_initial_margin(
-            signal.entry_price,
-            quantity,
-            leverage,
-        );
+        let initial_margin = calculate_initial_margin(signal.entry_price, quantity, leverage);
 
-        let maintenance_margin = calculate_maintenance_margin(
-            signal.entry_price,
-            quantity,
-            maintenance_margin_rate,
-        );
+        let maintenance_margin =
+            calculate_maintenance_margin(signal.entry_price, quantity, maintenance_margin_rate);
 
         let position = Position {
             id: Uuid::new_v4().to_string(),
@@ -108,6 +101,7 @@ impl PositionManager {
             entry_time: Utc::now(),
             exit_time: None,
             exit_price: None,
+            exit_reason: None,
             break_even_moved: false,
             leverage,
             margin_type,
@@ -119,6 +113,11 @@ impl PositionManager {
             tp1_price: None,
             tp2_price: None,
             original_quantity: quantity,
+            entry_features: signal.entry_features.clone(),
+            max_favorable_excursion_pct: Decimal::ZERO,
+            max_adverse_excursion_pct: Decimal::ZERO,
+            time_to_mfe_secs: None,
+            time_to_mae_secs: None,
         };
         self.positions.push(position.clone());
         position
@@ -167,6 +166,7 @@ impl PositionManager {
         position_id: &str,
         exit_price: Decimal,
         fee_rate: Decimal,
+        exit_reason: ExitReason,
     ) -> Option<Position> {
         let pos = self
             .positions
@@ -186,6 +186,7 @@ impl PositionManager {
         pos.pnl += net_pnl; // Add to any existing partial PnL
         pos.exit_price = Some(exit_price);
         pos.exit_time = Some(Utc::now());
+        pos.exit_reason = Some(exit_reason);
         pos.status = PositionStatus::Closed;
 
         Some(pos.clone())
@@ -250,12 +251,19 @@ impl PositionManager {
     pub fn finalized_positions(&self) -> Vec<&Position> {
         self.positions
             .iter()
-            .filter(|p| p.status == PositionStatus::Closed || p.status == PositionStatus::Liquidated)
+            .filter(|p| {
+                p.status == PositionStatus::Closed || p.status == PositionStatus::Liquidated
+            })
             .collect()
     }
 
     /// Check if any position should be liquidated based on liquidation price
-    pub fn check_liquidations(&mut self, symbol: &str, mark_price: Decimal, fee_rate: Decimal) -> Vec<Position> {
+    pub fn check_liquidations(
+        &mut self,
+        symbol: &str,
+        mark_price: Decimal,
+        fee_rate: Decimal,
+    ) -> Vec<Position> {
         let ids_to_liquidate: Vec<String> = self
             .positions
             .iter()
@@ -286,6 +294,7 @@ impl PositionManager {
                 pos.pnl = net_pnl;
                 pos.exit_price = Some(liquidation_price);
                 pos.exit_time = Some(Utc::now());
+                pos.exit_reason = Some(ExitReason::Liquidation);
                 pos.status = PositionStatus::Liquidated;
 
                 liquidated.push(pos.clone());
@@ -295,41 +304,87 @@ impl PositionManager {
     }
 
     /// Check if any position should be stopped out or take profit hit
-    pub fn check_exits(&mut self, symbol: &str, current_price: Decimal, fee_rate: Decimal) -> Vec<Position> {
-        let ids_to_close: Vec<(String, Decimal)> = self
+    pub fn check_exits(
+        &mut self,
+        symbol: &str,
+        current_price: Decimal,
+        fee_rate: Decimal,
+    ) -> Vec<Position> {
+        let ids_to_close: Vec<(String, Decimal, ExitReason)> = self
             .positions
             .iter()
             .filter(|p| p.status == PositionStatus::Open && p.symbol == symbol)
-            .filter_map(|p| {
-                match p.side {
-                    Side::Buy => {
-                        if current_price <= p.stop_loss {
-                            Some((p.id.clone(), p.stop_loss))
-                        } else if current_price >= p.take_profit {
-                            Some((p.id.clone(), p.take_profit))
-                        } else {
-                            None
-                        }
+            .filter_map(|p| match p.side {
+                Side::Buy => {
+                    if current_price <= p.stop_loss {
+                        Some((p.id.clone(), p.stop_loss, ExitReason::StopLoss))
+                    } else if current_price >= p.take_profit {
+                        Some((p.id.clone(), p.take_profit, ExitReason::TakeProfit))
+                    } else {
+                        None
                     }
-                    Side::Sell => {
-                        if current_price >= p.stop_loss {
-                            Some((p.id.clone(), p.stop_loss))
-                        } else if current_price <= p.take_profit {
-                            Some((p.id.clone(), p.take_profit))
-                        } else {
-                            None
-                        }
+                }
+                Side::Sell => {
+                    if current_price >= p.stop_loss {
+                        Some((p.id.clone(), p.stop_loss, ExitReason::StopLoss))
+                    } else if current_price <= p.take_profit {
+                        Some((p.id.clone(), p.take_profit, ExitReason::TakeProfit))
+                    } else {
+                        None
                     }
                 }
             })
             .collect();
 
         let mut closed = Vec::new();
-        for (id, price) in ids_to_close {
-            if let Some(pos) = self.close_position(&id, price, fee_rate) {
+        for (id, price, reason) in ids_to_close {
+            if let Some(pos) = self.close_position(&id, price, fee_rate, reason) {
                 closed.push(pos);
             }
         }
         closed
+    }
+
+    pub fn update_excursions(&mut self, symbol: &str, mark_price: Decimal, now: DateTime<Utc>) {
+        if mark_price <= Decimal::ZERO {
+            return;
+        }
+
+        for pos in self
+            .positions
+            .iter_mut()
+            .filter(|p| p.status == PositionStatus::Open && p.symbol == symbol)
+        {
+            if pos.entry_price <= Decimal::ZERO {
+                continue;
+            }
+            let favorable = match pos.side {
+                Side::Buy => {
+                    ((mark_price - pos.entry_price) / pos.entry_price) * Decimal::from(100)
+                }
+                Side::Sell => {
+                    ((pos.entry_price - mark_price) / pos.entry_price) * Decimal::from(100)
+                }
+            };
+            let adverse = if favorable < Decimal::ZERO {
+                favorable.abs()
+            } else {
+                Decimal::ZERO
+            };
+            let favorable = if favorable > Decimal::ZERO {
+                favorable
+            } else {
+                Decimal::ZERO
+            };
+
+            if favorable > pos.max_favorable_excursion_pct {
+                pos.max_favorable_excursion_pct = favorable;
+                pos.time_to_mfe_secs = Some((now - pos.entry_time).num_seconds());
+            }
+            if adverse > pos.max_adverse_excursion_pct {
+                pos.max_adverse_excursion_pct = adverse;
+                pos.time_to_mae_secs = Some((now - pos.entry_time).num_seconds());
+            }
+        }
     }
 }

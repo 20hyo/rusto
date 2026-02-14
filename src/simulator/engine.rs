@@ -5,7 +5,7 @@ use crate::simulator::order_book::LocalOrderBook;
 use crate::simulator::position::PositionManager;
 use crate::simulator::trade_log::TradeLogger;
 use crate::types::{
-    BotStats, DepthUpdate, ExecutionEvent, MarginType, MarketEvent, NormalizedTrade,
+    BotStats, DepthUpdate, ExecutionEvent, ExitReason, MarginType, MarketEvent, NormalizedTrade,
     ProcessingEvent, SymbolStats, TradeSignal,
 };
 use rust_decimal::Decimal;
@@ -176,44 +176,45 @@ impl SimulatorEngine {
         }
 
         // Validate and adjust order parameters using exchange info
-        let (validated_entry, validated_quantity) = if let Some(ref exchange_info) = self.exchange_info {
-            if let Some(symbol_info) = exchange_info.get_symbol_info(&signal.symbol) {
-                match symbol_info.validate_order(signal.entry_price, quantity) {
-                    Ok((rounded_price, rounded_qty)) => {
-                        if rounded_price != signal.entry_price || rounded_qty != quantity {
-                            info!(
-                                symbol = %signal.symbol,
-                                original_price = %signal.entry_price,
-                                rounded_price = %rounded_price,
-                                original_qty = %quantity,
-                                rounded_qty = %rounded_qty,
-                                "Order parameters adjusted to exchange filters"
-                            );
+        let (validated_entry, validated_quantity) =
+            if let Some(ref exchange_info) = self.exchange_info {
+                if let Some(symbol_info) = exchange_info.get_symbol_info(&signal.symbol) {
+                    match symbol_info.validate_order(signal.entry_price, quantity) {
+                        Ok((rounded_price, rounded_qty)) => {
+                            if rounded_price != signal.entry_price || rounded_qty != quantity {
+                                info!(
+                                    symbol = %signal.symbol,
+                                    original_price = %signal.entry_price,
+                                    rounded_price = %rounded_price,
+                                    original_qty = %quantity,
+                                    rounded_qty = %rounded_qty,
+                                    "Order parameters adjusted to exchange filters"
+                                );
+                            }
+                            (rounded_price, rounded_qty)
                         }
-                        (rounded_price, rounded_qty)
+                        Err(e) => {
+                            warn!(
+                                symbol = %signal.symbol,
+                                entry = %signal.entry_price,
+                                quantity = %quantity,
+                                error = ?e,
+                                "Order validation failed"
+                            );
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        warn!(
-                            symbol = %signal.symbol,
-                            entry = %signal.entry_price,
-                            quantity = %quantity,
-                            error = ?e,
-                            "Order validation failed"
-                        );
-                        return;
-                    }
+                } else {
+                    warn!(
+                        symbol = %signal.symbol,
+                        "Symbol info not found in exchange info, using original values"
+                    );
+                    (signal.entry_price, quantity)
                 }
             } else {
-                warn!(
-                    symbol = %signal.symbol,
-                    "Symbol info not found in exchange info, using original values"
-                );
+                // No exchange info available, use original values
                 (signal.entry_price, quantity)
-            }
-        } else {
-            // No exchange info available, use original values
-            (signal.entry_price, quantity)
-        };
+            };
 
         // Create modified signal with validated values
         let mut validated_signal = signal.clone();
@@ -244,6 +245,7 @@ impl SimulatorEngine {
         }
 
         self.risk_manager.register_position(&position);
+        self.trade_logger.log_entry(&position);
 
         info!(
             id = %position.id,
@@ -269,13 +271,19 @@ impl SimulatorEngine {
     fn on_trade(&mut self, trade: &NormalizedTrade) {
         // Keep shared stats up to date for the hourly reporter task
         self.sync_bot_stats();
+        // Update per-position MFE/MAE before checking exits
+        self.position_manager
+            .update_excursions(&trade.symbol, trade.price, trade.timestamp);
 
         // First, check for liquidations (highest priority)
         let liquidated = self.check_liquidations(&trade.symbol, trade.price);
         for position in &liquidated {
             self.risk_manager.close_position(position);
             self.trade_logger.log_trade(position);
-            self.symbol_stats.entry(position.symbol.clone()).or_default().record_close(position.pnl);
+            self.symbol_stats
+                .entry(position.symbol.clone())
+                .or_default()
+                .record_close(position.pnl);
 
             warn!(
                 id = %position.id,
@@ -296,16 +304,17 @@ impl SimulatorEngine {
         self.check_multi_stage_exits(&trade.symbol, trade.price, trade.timestamp);
 
         // Then check normal exits (stop loss / take profit)
-        let closed = self.position_manager.check_exits(
-            &trade.symbol,
-            trade.price,
-            self.fee_rate,
-        );
+        let closed = self
+            .position_manager
+            .check_exits(&trade.symbol, trade.price, self.fee_rate);
 
         for position in &closed {
             self.risk_manager.close_position(position);
             self.trade_logger.log_trade(position);
-            self.symbol_stats.entry(position.symbol.clone()).or_default().record_close(position.pnl);
+            self.symbol_stats
+                .entry(position.symbol.clone())
+                .or_default()
+                .record_close(position.pnl);
 
             info!(
                 id = %position.id,
@@ -341,7 +350,10 @@ impl SimulatorEngine {
                     .should_move_to_break_even(pos, trade.price, trade.timestamp)
                 {
                     let new_stop = self.risk_manager.break_even_stop_price(pos);
-                    if self.position_manager.move_stop_to_break_even(&pos_id, new_stop) {
+                    if self
+                        .position_manager
+                        .move_stop_to_break_even(&pos_id, new_stop)
+                    {
                         info!(
                             position_id = %pos_id,
                             new_stop = %new_stop,
@@ -372,8 +384,13 @@ impl SimulatorEngine {
     }
 
     /// Check for liquidations based on current price
-    fn check_liquidations(&mut self, symbol: &str, mark_price: Decimal) -> Vec<crate::types::Position> {
-        self.position_manager.check_liquidations(symbol, mark_price, self.fee_rate)
+    fn check_liquidations(
+        &mut self,
+        symbol: &str,
+        mark_price: Decimal,
+    ) -> Vec<crate::types::Position> {
+        self.position_manager
+            .check_liquidations(symbol, mark_price, self.fee_rate)
     }
 
     /// Check multi-stage exits: TP1 (50% at VWAP), TP2 (100% at VAH), Soft Stop (10s timeout)
@@ -389,10 +406,33 @@ impl SimulatorEngine {
             .position_manager
             .open_positions_for(symbol)
             .into_iter()
-            .map(|p| (p.id.clone(), p.side, p.setup, p.entry_price, p.entry_time, p.tp1_filled, p.tp1_price, p.tp2_price, p.quantity))
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    p.side,
+                    p.setup,
+                    p.entry_price,
+                    p.entry_time,
+                    p.tp1_filled,
+                    p.tp1_price,
+                    p.tp2_price,
+                    p.quantity,
+                )
+            })
             .collect();
 
-        for (pos_id, side, setup, entry_price, entry_time, tp1_filled, tp1_price, tp2_price, quantity) in open_positions {
+        for (
+            pos_id,
+            side,
+            setup,
+            entry_price,
+            entry_time,
+            tp1_filled,
+            tp1_price,
+            tp2_price,
+            quantity,
+        ) in open_positions
+        {
             // Only apply to AdvancedOrderFlow strategy
             if setup != SetupType::AdvancedOrderFlow {
                 continue;
@@ -459,10 +499,18 @@ impl SimulatorEngine {
                     };
 
                     if tp2_reached {
-                        if let Some(pos) = self.position_manager.close_position(&pos_id, tp2, self.fee_rate) {
+                        if let Some(pos) = self.position_manager.close_position(
+                            &pos_id,
+                            tp2,
+                            self.fee_rate,
+                            ExitReason::TP2,
+                        ) {
                             self.risk_manager.close_position(&pos);
                             self.trade_logger.log_trade(&pos);
-                            self.symbol_stats.entry(pos.symbol.clone()).or_default().record_close(pos.pnl);
+                            self.symbol_stats
+                                .entry(pos.symbol.clone())
+                                .or_default()
+                                .record_close(pos.pnl);
 
                             info!(
                                 position_id = %pos_id,
@@ -500,10 +548,18 @@ impl SimulatorEngine {
                 };
 
                 if no_progress {
-                    if let Some(pos) = self.position_manager.close_position(&pos_id, current_price, self.fee_rate) {
+                    if let Some(pos) = self.position_manager.close_position(
+                        &pos_id,
+                        current_price,
+                        self.fee_rate,
+                        ExitReason::SoftStop,
+                    ) {
                         self.risk_manager.close_position(&pos);
                         self.trade_logger.log_trade(&pos);
-                        self.symbol_stats.entry(pos.symbol.clone()).or_default().record_close(pos.pnl);
+                        self.symbol_stats
+                            .entry(pos.symbol.clone())
+                            .or_default()
+                            .record_close(pos.pnl);
 
                         warn!(
                             position_id = %pos_id,

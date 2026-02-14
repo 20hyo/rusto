@@ -1,6 +1,6 @@
 use crate::types::Position;
-use rust_decimal::Decimal;
 use rusqlite::{params, Connection};
+use rust_decimal::Decimal;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -62,6 +62,38 @@ impl TradeLogger {
             panic!("Cannot continue without database schema");
         }
 
+        // Backward-compatible schema upgrades for older databases.
+        Self::add_column_if_missing(&conn, "positions", "exit_reason", "TEXT");
+        Self::add_column_if_missing(&conn, "positions", "mfe_pct", "REAL");
+        Self::add_column_if_missing(&conn, "positions", "mae_pct", "REAL");
+        Self::add_column_if_missing(&conn, "positions", "time_to_mfe_secs", "INTEGER");
+        Self::add_column_if_missing(&conn, "positions", "time_to_mae_secs", "INTEGER");
+
+        // Create entry-feature table (one row per entry)
+        if let Err(e) = conn.execute(
+            "CREATE TABLE IF NOT EXISTS entry_features (
+                position_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                setup TEXT NOT NULL,
+                entry_time TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                imbalance_ratio REAL,
+                cvd_1min_change REAL,
+                volume_burst_ratio REAL,
+                bar_range_pct REAL,
+                zone_distance_pct REAL,
+                near_val INTEGER,
+                near_vah INTEGER,
+                near_hvn INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        ) {
+            error!("Failed to create entry_features table: {}", e);
+            panic!("Cannot continue without entry_features schema");
+        }
+
         // Create performance summary table (one row per completed run)
         if let Err(e) = conn.execute(
             "CREATE TABLE IF NOT EXISTS performance_metrics (
@@ -103,6 +135,48 @@ impl TradeLogger {
         self.log_sqlite(position);
     }
 
+    /// Log entry-time features for later strategy analysis.
+    pub fn log_entry(&self, position: &Position) {
+        let Some(features) = position.entry_features.as_ref() else {
+            return;
+        };
+
+        let db = match self.db.lock() {
+            Ok(db) => db,
+            Err(e) => {
+                error!("Failed to acquire database lock for entry_features: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = db.execute(
+            "INSERT INTO entry_features (
+                position_id, symbol, side, setup, entry_time, entry_price,
+                imbalance_ratio, cvd_1min_change, volume_burst_ratio, bar_range_pct,
+                zone_distance_pct, near_val, near_vah, near_hvn
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(position_id) DO NOTHING",
+            params![
+                position.id,
+                position.symbol,
+                format!("{:?}", position.side),
+                format!("{}", position.setup),
+                position.entry_time.to_rfc3339(),
+                position.entry_price.to_string(),
+                features.imbalance_ratio.to_string(),
+                features.cvd_1min_change.to_string(),
+                features.volume_burst_ratio.to_string(),
+                features.bar_range_pct.to_string(),
+                features.zone_distance_pct.to_string(),
+                features.near_val as i32,
+                features.near_vah as i32,
+                features.near_hvn as i32,
+            ],
+        ) {
+            error!("Failed to insert entry_features into database: {}", e);
+        }
+    }
+
     fn log_sqlite(&self, position: &Position) {
         let db = match self.db.lock() {
             Ok(db) => db,
@@ -114,17 +188,24 @@ impl TradeLogger {
 
         let exit_price = position.exit_price.map(|p| p.to_string());
         let exit_time = position.exit_time.map(|t| t.to_rfc3339());
+        let exit_reason = position.exit_reason.map(|r| r.to_string());
 
         if let Err(e) = db.execute(
             "INSERT INTO positions (
                 id, symbol, side, setup, entry_price, exit_price, quantity,
-                stop_loss, take_profit, pnl, status, entry_time, exit_time, break_even_moved
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                stop_loss, take_profit, pnl, status, entry_time, exit_time, break_even_moved,
+                exit_reason, mfe_pct, mae_pct, time_to_mfe_secs, time_to_mae_secs
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
             ON CONFLICT(id) DO UPDATE SET
                 exit_price = excluded.exit_price,
                 pnl = excluded.pnl,
                 status = excluded.status,
-                exit_time = excluded.exit_time",
+                exit_time = excluded.exit_time,
+                exit_reason = excluded.exit_reason,
+                mfe_pct = excluded.mfe_pct,
+                mae_pct = excluded.mae_pct,
+                time_to_mfe_secs = excluded.time_to_mfe_secs,
+                time_to_mae_secs = excluded.time_to_mae_secs",
             params![
                 position.id,
                 position.symbol,
@@ -140,9 +221,27 @@ impl TradeLogger {
                 position.entry_time.to_rfc3339(),
                 exit_time,
                 position.break_even_moved as i32,
+                exit_reason,
+                position.max_favorable_excursion_pct.to_string(),
+                position.max_adverse_excursion_pct.to_string(),
+                position.time_to_mfe_secs,
+                position.time_to_mae_secs,
             ],
         ) {
             error!("Failed to insert position into database: {}", e);
+        }
+    }
+
+    fn add_column_if_missing(conn: &Connection, table: &str, column: &str, col_type: &str) {
+        let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type);
+        if let Err(e) = conn.execute(&sql, []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                error!(
+                    "Failed to add column {}.{} ({}): {}",
+                    table, column, col_type, e
+                );
+            }
         }
     }
 
@@ -163,10 +262,7 @@ impl TradeLogger {
                 }
             }
         } else {
-            OpenOptions::new()
-                .append(true)
-                .open(&self.csv_path)
-                .ok()
+            OpenOptions::new().append(true).open(&self.csv_path).ok()
         };
 
         if let Some(mut f) = file {
@@ -353,8 +449,16 @@ impl TradeLogger {
         info!("Winners: {} | Losers: {}", m.winners, m.losers);
         info!("Win rate: {}%", m.win_rate_pct.round_dp(2));
         info!("Total PnL: {}", m.total_pnl.round_dp(4));
-        info!("Gross profit: {} | Gross loss: -{}", m.gross_profit.round_dp(4), m.gross_loss_abs.round_dp(4));
-        info!("Avg win: {} | Avg loss: {}", m.avg_win.round_dp(4), m.avg_loss.round_dp(4));
+        info!(
+            "Gross profit: {} | Gross loss: -{}",
+            m.gross_profit.round_dp(4),
+            m.gross_loss_abs.round_dp(4)
+        );
+        info!(
+            "Avg win: {} | Avg loss: {}",
+            m.avg_win.round_dp(4),
+            m.avg_loss.round_dp(4)
+        );
         match m.profit_factor {
             Some(v) => info!("Profit factor: {}", v.round_dp(4)),
             None => info!("Profit factor: N/A"),

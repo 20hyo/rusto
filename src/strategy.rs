@@ -1,9 +1,9 @@
 use crate::config::{RiskConfig, StrategyConfig};
 use crate::types::{
-    OrderFlowMetrics, RangeBar, SetupType, Side, TradeSignal, VolumeProfileSnapshot,
+    EntryFeatures, OrderFlowMetrics, RangeBar, SetupType, Side, TradeSignal, VolumeProfileSnapshot,
 };
-use rust_decimal::Decimal;
 use rusqlite::{params, Connection};
+use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use tracing::{info, warn};
 
@@ -140,10 +140,8 @@ impl StrategyEngine {
         }
 
         let tick_size = Decimal::ONE; // simplified tick
-        let distance_threshold =
-            tick_size * Decimal::from(self.config.aaa_poc_distance_ticks);
-        let stop_distance =
-            tick_size * Decimal::from(self.risk_config.default_stop_ticks);
+        let distance_threshold = tick_size * Decimal::from(self.config.aaa_poc_distance_ticks);
+        let stop_distance = tick_size * Decimal::from(self.risk_config.default_stop_ticks);
         // Near VAL + sell absorption → Long
         if flow.absorption_side == Some(Side::Sell)
             && (bar.close - profile.val).abs() <= distance_threshold
@@ -220,8 +218,7 @@ impl StrategyEngine {
 
         let min_delta =
             Decimal::try_from(self.config.min_delta_confirmation).unwrap_or(Decimal::ONE);
-        let stop_distance =
-            Decimal::from(self.risk_config.default_stop_ticks);
+        let stop_distance = Decimal::from(self.risk_config.default_stop_ticks);
         let target_mult =
             Decimal::try_from(self.risk_config.default_target_multiplier).unwrap_or(Decimal::TWO);
 
@@ -286,8 +283,7 @@ impl StrategyEngine {
             return None;
         }
 
-        let stop_distance =
-            Decimal::from(self.risk_config.default_stop_ticks);
+        let stop_distance = Decimal::from(self.risk_config.default_stop_ticks);
         let target_mult =
             Decimal::try_from(self.risk_config.default_target_multiplier).unwrap_or(Decimal::TWO);
 
@@ -362,8 +358,8 @@ impl StrategyEngine {
             .unwrap_or(Decimal::new(18, 1));
         let min_abs_cvd_change = Decimal::try_from(self.config.advanced_min_cvd_1min_change)
             .unwrap_or(Decimal::new(5, 0));
-        let min_bar_range_pct = Decimal::try_from(self.config.advanced_min_bar_range_pct)
-            .unwrap_or(Decimal::new(3, 2));
+        let min_bar_range_pct =
+            Decimal::try_from(self.config.advanced_min_bar_range_pct).unwrap_or(Decimal::new(3, 2));
         let min_volume_burst_ratio = self.min_volume_burst_ratio_for(&bar.symbol);
 
         let bar_range = (bar.high - bar.low).abs();
@@ -386,73 +382,125 @@ impl StrategyEngine {
         match self.advanced_side_without_burst(bar, flow, profile, zone_threshold, min_imbalance)? {
             Side::Buy => {
                 let near_val = (bar.close - profile.val).abs() <= zone_threshold;
-            let entry = bar.close;
-            let stop = entry * Decimal::new(996, 3); // -0.4%
-            let tp2 = profile.vah;
+                let near_hvn = profile
+                    .hvn
+                    .map_or(false, |hvn| (bar.close - hvn).abs() <= zone_threshold);
+                let zone_distance_pct = self.zone_distance_pct(bar.close, profile);
+                let features = EntryFeatures {
+                    imbalance_ratio: flow.imbalance_ratio,
+                    cvd_1min_change: flow.cvd_1min_change,
+                    volume_burst_ratio: flow.volume_burst_ratio,
+                    bar_range_pct,
+                    zone_distance_pct,
+                    near_val,
+                    near_vah: false,
+                    near_hvn,
+                };
+                let entry = bar.close;
+                let stop = entry * Decimal::new(996, 3); // -0.4%
+                let tp2 = profile.vah;
 
-            info!(
-                symbol = %bar.symbol,
-                setup = "AdvancedOrderFlow",
-                side = "🟢 LONG",
-                entry = %entry,
-                stop = %stop,
-                tp1_vwap = %profile.vwap,
-                tp2_vah = %tp2,
-                cvd_change = %flow.cvd_1min_change,
-                volume_burst_ratio = %flow.volume_burst_ratio,
-                required_burst_ratio = %min_volume_burst_ratio,
-                near_zone = if near_val { "VAL" } else { "HVN" },
-                "🎯 Long: 매도 압축 포착!"
-            );
+                info!(
+                    symbol = %bar.symbol,
+                    setup = "AdvancedOrderFlow",
+                    side = "🟢 LONG",
+                    entry = %entry,
+                    stop = %stop,
+                    tp1_vwap = %profile.vwap,
+                    tp2_vah = %tp2,
+                    cvd_change = %flow.cvd_1min_change,
+                    volume_burst_ratio = %flow.volume_burst_ratio,
+                    required_burst_ratio = %min_volume_burst_ratio,
+                    near_zone = if near_val { "VAL" } else { "HVN" },
+                    "🎯 Long: 매도 압축 포착!"
+                );
 
-            self.last_advanced_signal_bar
-                .insert(bar.symbol.clone(), bar.bar_index);
+                self.last_advanced_signal_bar
+                    .insert(bar.symbol.clone(), bar.bar_index);
 
-            return Some(TradeSignal::new(
-                bar.symbol.clone(),
-                Side::Buy,
-                SetupType::AdvancedOrderFlow,
-                entry,
-                stop,
-                tp2,
-                Decimal::try_from(0.85).unwrap_or(Decimal::ONE),
-            ));
+                return Some(
+                    TradeSignal::new(
+                        bar.symbol.clone(),
+                        Side::Buy,
+                        SetupType::AdvancedOrderFlow,
+                        entry,
+                        stop,
+                        tp2,
+                        Decimal::try_from(0.85).unwrap_or(Decimal::ONE),
+                    )
+                    .with_entry_features(features),
+                );
             }
             Side::Sell => {
                 let near_vah = (bar.close - profile.vah).abs() <= zone_threshold;
-            let entry = bar.close;
-            let stop = entry * Decimal::new(1004, 3); // +0.4%
-            let tp2 = profile.val;
+                let near_hvn = profile
+                    .hvn
+                    .map_or(false, |hvn| (bar.close - hvn).abs() <= zone_threshold);
+                let zone_distance_pct = self.zone_distance_pct(bar.close, profile);
+                let features = EntryFeatures {
+                    imbalance_ratio: flow.imbalance_ratio,
+                    cvd_1min_change: flow.cvd_1min_change,
+                    volume_burst_ratio: flow.volume_burst_ratio,
+                    bar_range_pct,
+                    zone_distance_pct,
+                    near_val: false,
+                    near_vah,
+                    near_hvn,
+                };
+                let entry = bar.close;
+                let stop = entry * Decimal::new(1004, 3); // +0.4%
+                let tp2 = profile.val;
 
-            info!(
-                symbol = %bar.symbol,
-                setup = "AdvancedOrderFlow",
-                side = "🔴 SHORT",
-                entry = %entry,
-                stop = %stop,
-                tp1_vwap = %profile.vwap,
-                tp2_val = %tp2,
-                cvd_change = %flow.cvd_1min_change,
-                volume_burst_ratio = %flow.volume_burst_ratio,
-                required_burst_ratio = %min_volume_burst_ratio,
-                near_zone = if near_vah { "VAH" } else { "HVN" },
-                "🎯 Short: 매수 압축 포착!"
-            );
+                info!(
+                    symbol = %bar.symbol,
+                    setup = "AdvancedOrderFlow",
+                    side = "🔴 SHORT",
+                    entry = %entry,
+                    stop = %stop,
+                    tp1_vwap = %profile.vwap,
+                    tp2_val = %tp2,
+                    cvd_change = %flow.cvd_1min_change,
+                    volume_burst_ratio = %flow.volume_burst_ratio,
+                    required_burst_ratio = %min_volume_burst_ratio,
+                    near_zone = if near_vah { "VAH" } else { "HVN" },
+                    "🎯 Short: 매수 압축 포착!"
+                );
 
-            self.last_advanced_signal_bar
-                .insert(bar.symbol.clone(), bar.bar_index);
+                self.last_advanced_signal_bar
+                    .insert(bar.symbol.clone(), bar.bar_index);
 
-            return Some(TradeSignal::new(
-                bar.symbol.clone(),
-                Side::Sell,
-                SetupType::AdvancedOrderFlow,
-                entry,
-                stop,
-                tp2,
-                Decimal::try_from(0.85).unwrap_or(Decimal::ONE),
-            ));
+                return Some(
+                    TradeSignal::new(
+                        bar.symbol.clone(),
+                        Side::Sell,
+                        SetupType::AdvancedOrderFlow,
+                        entry,
+                        stop,
+                        tp2,
+                        Decimal::try_from(0.85).unwrap_or(Decimal::ONE),
+                    )
+                    .with_entry_features(features),
+                );
             }
         }
+    }
+
+    fn zone_distance_pct(&self, price: Decimal, profile: &VolumeProfileSnapshot) -> Decimal {
+        if price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        let mut min_dist = (price - profile.val).abs();
+        let vah_dist = (price - profile.vah).abs();
+        if vah_dist < min_dist {
+            min_dist = vah_dist;
+        }
+        if let Some(hvn) = profile.hvn {
+            let hvn_dist = (price - hvn).abs();
+            if hvn_dist < min_dist {
+                min_dist = hvn_dist;
+            }
+        }
+        (min_dist / price) * Decimal::from(100)
     }
 
     fn min_volume_burst_ratio_for(&self, symbol: &str) -> Decimal {
@@ -475,7 +523,9 @@ impl StrategyEngine {
     ) -> Option<Side> {
         // ========== LONG 조건 ==========
         let near_val = (bar.close - profile.val).abs() <= zone_threshold;
-        let near_hvn = profile.hvn.map_or(false, |hvn| (bar.close - hvn).abs() <= zone_threshold);
+        let near_hvn = profile
+            .hvn
+            .map_or(false, |hvn| (bar.close - hvn).abs() <= zone_threshold);
         let reversal_ok_long = !self.config.advanced_require_reversal_bar || bar.close > bar.open;
         let sell_to_buy_ratio = if flow.imbalance_ratio > Decimal::ZERO {
             Decimal::ONE / flow.imbalance_ratio
@@ -639,8 +689,8 @@ impl StrategyEngine {
             return None;
         }
 
-        let stop_pct = Decimal::try_from(self.config.advanced_tuning_stop_pct)
-            .unwrap_or(Decimal::new(20, 2));
+        let stop_pct =
+            Decimal::try_from(self.config.advanced_tuning_stop_pct).unwrap_or(Decimal::new(20, 2));
         let target_pct = Decimal::try_from(self.config.advanced_tuning_target_pct)
             .unwrap_or(Decimal::new(35, 2));
         if stop_pct <= Decimal::ZERO || target_pct <= Decimal::ZERO {
@@ -652,12 +702,10 @@ impl StrategyEngine {
             .unwrap_or(Decimal::new(18, 1));
         let min_abs_cvd_change = Decimal::try_from(self.config.advanced_min_cvd_1min_change)
             .unwrap_or(Decimal::new(5, 0));
-        let min_bar_range_pct = Decimal::try_from(self.config.advanced_min_bar_range_pct)
-            .unwrap_or(Decimal::new(3, 2));
+        let min_bar_range_pct =
+            Decimal::try_from(self.config.advanced_min_bar_range_pct).unwrap_or(Decimal::new(3, 2));
 
-        let start = samples
-            .len()
-            .saturating_sub(lookback + lookahead + 1);
+        let start = samples.len().saturating_sub(lookback + lookahead + 1);
         let end = samples.len().saturating_sub(lookahead);
         if end <= start {
             return None;
@@ -706,7 +754,9 @@ impl StrategyEngine {
                 };
 
                 trades += 1;
-                if self.evaluate_lookahead_outcome(samples, idx, lookahead, side, stop_pct, target_pct) {
+                if self
+                    .evaluate_lookahead_outcome(samples, idx, lookahead, side, stop_pct, target_pct)
+                {
                     wins += 1;
                 }
             }
@@ -716,7 +766,8 @@ impl StrategyEngine {
             }
 
             let losses = trades.saturating_sub(wins);
-            let win_rate = Decimal::from(wins as u64) * Decimal::from(100) / Decimal::from(trades as u64);
+            let win_rate =
+                Decimal::from(wins as u64) * Decimal::from(100) / Decimal::from(trades as u64);
             let expectancy_pct = ((Decimal::from(wins as u64) * target_pct)
                 - (Decimal::from(losses as u64) * stop_pct))
                 / Decimal::from(trades as u64);
@@ -724,9 +775,7 @@ impl StrategyEngine {
             match &best {
                 None => best = Some((candidate_dec, trades, win_rate, expectancy_pct)),
                 Some((_b_ratio, b_trades, _b_wr, b_exp)) => {
-                    if expectancy_pct > *b_exp
-                        || (expectancy_pct == *b_exp && trades > *b_trades)
-                    {
+                    if expectancy_pct > *b_exp || (expectancy_pct == *b_exp && trades > *b_trades) {
                         best = Some((candidate_dec, trades, win_rate, expectancy_pct));
                     }
                 }
